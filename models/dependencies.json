@@ -1,0 +1,119 @@
+{
+  "formatVersion": 1,
+  "notes": "Pinned portable Windows x64 artifacts. Qwen vision projector belongs to exactly the same repository revision as the language model. Empty hash means local SHA-256 is recorded after download, not upstream authenticated.",
+  "artifacts": [
+    {
+      "id": "llama-vulkan-b12110",
+      "component": "llama",
+      "kind": "runtime",
+      "backend": "vulkan",
+      "bytes": 37661146,
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-vulkan-x64.zip",
+      "path": "runtimes/downloads/llama-b12110-vulkan.zip",
+      "sha256": "9732a5e48887ca54d0bfe4af4324dc85fd56cd8cda19b52df3542fa6ebe6874f",
+      "extractTo": "runtimes/llama",
+      "executable": "llama-server.exe"
+    },
+    {
+      "id": "llama-cpu-b12110",
+      "component": "llama",
+      "kind": "runtime",
+      "backend": "cpu",
+      "bytes": 24708445,
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-cpu-x64.zip",
+      "path": "runtimes/downloads/llama-b12110-cpu.zip",
+      "sha256": "98901e327c252875accaf2d1bf364e10e868843b0b63468baad1aa945cdc5da2",
+      "extractTo": "runtimes/llama",
+      "executable": "llama-server.exe"
+    },
+    {
+      "id": "whisper-v1.9.2",
+      "component": "whisper",
+      "kind": "runtime",
+      "bytes": 8194445,
+      "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-bin-x64.zip",
+      "path": "runtimes/downloads/whisper-v1.9.2.zip",
+      "sha256": "49dcc16de826f20bd53d44f947a1ae49dfa81f86cad67a64d80820cb192d674a",
+      "extractTo": "runtimes/whisper",
+      "executable": "whisper-cli.exe"
+    },
+    {
+      "id": "piper-2023.11.14-2",
+      "component": "piper",
+      "kind": "runtime",
+      "bytes": 22477236,
+      "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip",
+      "path": "runtimes/downloads/piper-2023.11.14-2.zip",
+      "sha256": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
+      "extractTo": "runtimes/piper",
+      "executable": "piper.exe"
+    },
+    {
+      "id": "qwen25vl3b-q4km",
+      "component": "llama",
+      "kind": "model",
+      "bytes": 1929901056,
+      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+      "path": "models/llm/model.gguf",
+      "sha256": "d02fe9b69ad8cadbbd228e387667af66612c44bed29ffc8eb1e7caf9ac486c12"
+    },
+    {
+      "id": "qwen25vl3b-mmproj-q8",
+      "component": "llama",
+      "kind": "model",
+      "bytes": 844757728,
+      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf",
+      "path": "models/llm/mmproj.gguf",
+      "sha256": "980c9b2f78c04e6cff93d277ada09e768394f112d75db3b4e9dea8a69f9fb904"
+    },
+    {
+      "id": "whisper-base-multilingual",
+      "component": "whisper",
+      "kind": "model",
+      "bytes": 147951465,
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+      "path": "models/whisper/ggml-base.bin",
+      "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+    },
+    {
+      "id": "piper-lessac-medium",
+      "component": "piper",
+      "kind": "model",
+      "bytes": 63201294,
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+      "path": "models/piper/en_US-lessac-medium.onnx",
+      "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"
+    },
+    {
+      "id": "piper-lessac-medium-config",
+      "component": "piper",
+      "kind": "model",
+      "bytes": 4885,
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
+      "path": "models/piper/en_US-lessac-medium.onnx.json",
+      "sha256": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"
+    },
+    {
+      "id": "piper-lessac-model-card",
+      "component": "piper",
+      "kind": "model",
+      "bytes": 351,
+      "url": "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/lessac/medium/MODEL_CARD",
+      "path": "models/piper/MODEL_CARD",
+      "sha256": "ce49eb457742208166d399a40cdec2c7fa9db77960930031564ab56f12882645"
+    },
+    {
+      "id": "microsoft-vc14-x64-14.51.36247",
+      "component": "common",
+      "kind": "runtime",
+      "archiveType": "vc-redist",
+      "bytes": 18731856,
+      "url": "https://download.visualstudio.microsoft.com/download/pr/ebdab8e5-1d7b-4d9f-a11b-cbb1720c3b12/843068991DAAA1F73AD9F6239BCE4D0F6A07A51F18C37EA2A867E9BECA71295C/VC_redist.x64.exe",
+      "path": "runtimes/downloads/VC_redist.x64.exe",
+      "sha256": "843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c",
+      "licenseUrl": "https://aka.ms/VCRedistLicense",
+      "licenseSnapshotPath": "models/licenses/Microsoft-VCRedist-LICENSE.html",
+      "licenseSnapshotSha256": "21b50c5c5619a257016ac4e4b1469e73a8c71566aeb84730e955dd9d175cbf53"
+    }
+  ]
+}
