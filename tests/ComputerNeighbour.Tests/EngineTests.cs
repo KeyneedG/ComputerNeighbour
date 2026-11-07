@@ -61,18 +61,107 @@ internal static class EngineTests
             Check.True(!fixture.Output.Lines.Any(l => l.Contains("В статье рассказано")), "The rejected Russian summary was printed.");
             Check.True(fixture.Memory.Recent.Where(e => e.Role is "assistant" or "note").All(e => !e.Text.Contains("В статье рассказано")), "The rejected Russian summary was persisted.");
         });
-        await suite.Case("two empty plaintext summaries fail without committing an assistant reply or factual note", async root =>
+        await suite.Case("two empty plaintext summaries report the actual read without saving an invented factual note", async root =>
         {
             var model = new ScriptedModel("", " \n\t");
             await using var fixture = await Fixture.CreateAsync(root, model);
             Directory.CreateDirectory(Path.Combine(root, "documents"));
             await File.WriteAllTextAsync(Path.Combine(root, "documents", "article.md"), "A readable source whose failed summary must not be fabricated.");
-            await Check.ThrowsAsync<InvalidDataException>(() => fixture.Engine.RespondAsync("Read documents/article.md.", "user", false, false, CancellationToken.None));
+            await fixture.Engine.RespondAsync("Read documents/article.md.", "user", false, false, CancellationToken.None);
             Check.Equal(2, model.Calls.Count);
             Check.True(model.Calls.All(c => !c.Json), "The direct summary unexpectedly requested structured output.");
-            Check.Equal(0, fixture.Output.Lines.Count);
-            Check.True(fixture.Memory.Recent.All(e => e.Role == "user"), "A failed summary committed an assistant reply or a factual note.");
+            Check.True(fixture.Output.Lines.Last().Contains("I read the file, but couldn't"),"The file read was lost when the summary failed.");
+            Check.True(fixture.Memory.Recent.All(e => e.Role != "note"), "A failed summary committed a factual note.");
             Check.Equal("", fixture.Memory.Summary);
+        });
+        await suite.Case("context classification precedes image capture and screen follow-ups use real evidence",async root=>
+        {
+            var model=new ContextModel("""{"intent":"screen"}""","You are looking at a railway scene in Unity.");
+            var captures=0;
+            Fixture? fixture=null;
+            fixture=await Fixture.CreateAsync(root,model,capture:()=>
+            {
+                Check.True(fixture!.Output.Lines.Last().Contains("I'll take a look"),"The screen was captured before the notice.");
+                Check.Equal(1,model.Classifications.Count,"Intent was not understood before capture.");
+                captures++;
+                return [1,2,3];
+            });
+            await using var f=fixture;
+            f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
+            await f.Engine.RespondAsync("Что видно в этом окне сейчас?","user",false,false,default);
+            Check.Equal(1,captures);
+            Check.True(model.Answers.Single().Any(m=>m.Image is [1,2,3]),"The actual captured image did not reach the answer stage.");
+            await f.Engine.RespondAsync("Так что ты все таки можешь смотреть что я делаю :/","user",false,false,default);
+            await f.Engine.RespondAsync("Так ты действительно видела мой экран и точно описала что на нем происходило","user",false,false,default);
+            Check.Equal(1,captures);
+            Check.True(f.Output.Lines.Last().Contains("I took a real screenshot"),"The confirmed previous image was denied or forgotten.");
+            Check.True(!f.Memory.Recent.Any(e=>e.Text.Contains("I'll take a look")),"The action notice was saved as a finished answer.");
+        });
+        await suite.Case("natural screen request handles disabled, paused and failed capture without guessing",async root=>
+        {
+            var calls=0;
+            var model=new ScriptedModel();
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{calls++;throw new IOException("Test desktop unavailable.");});
+            const string request="Можешь сказать чем я сейчас занят? (Подсказка, посмиотри экран)";
+            await f.Engine.RespondAsync(request,"user",false,false,default);
+            f.Config.Permissions.ScreenCapture=true;
+            await f.Engine.RespondAsync(request,"user",false,false,default);
+            Check.Equal(0,calls);
+            f.Engine.Paused=false;
+            await f.Engine.RespondAsync(request,"user",false,false,default);
+            Check.Equal(1,calls);
+            Check.True(f.Output.Lines.Last().Contains("Test desktop unavailable"),"Capture failure was hidden.");
+            await f.Engine.RespondAsync("Так ты действительно видела мой экран?","user",false,false,default);
+            Check.True(f.Output.Lines.Last().Contains("haven't completed"),"A failed capture became verified evidence.");
+            Check.Equal(0,model.Calls.Count);
+        });
+        await suite.Case("reads live Notepad text for reported filename and reports actual file capability",async root=>
+        {
+            var open=new OpenDocuments(new("LIVE_UNSAVED_SENTINEL: purple trains.",null));
+            var model=new ScriptedModel("Your open note describes purple trains.");
+            await using var f=await Fixture.CreateAsync(root,model,openDocuments:open);
+            Directory.CreateDirectory(Path.Combine(root,"documents"));
+            await File.WriteAllTextAsync(Path.Combine(root,"documents","PVP1.txt"),"STALE_DISK_SENTINEL");
+            await f.Engine.RespondAsync("Are you able to read texts on this PC?","user",false,false,default);
+            Check.True(f.Output.Lines.Last().Contains("open Notepad tab"),"The actual file capability was denied.");
+            await f.Engine.RespondAsync("прочти текст в открытом блокноте PVP1.txt","user",false,false,default);
+            Check.Equal(("PVP1.txt",true),open.Requests.Single());
+            var source=model.Calls.Single().Messages.Last().Text;
+            Check.True(source.Contains("LIVE_UNSAVED_SENTINEL")&&!source.Contains("STALE_DISK_SENTINEL"),"Disk text replaced the live Notepad text.");
+            Check.True(f.Output.Lines[^2].Contains("I'll check the open Notepad tabs"),"The Notepad action was not announced.");
+        });
+        await suite.Case("filename search uses configured folders and reports duplicate files",async root=>
+        {
+            var open=new OpenDocuments(null);
+            var model=new ScriptedModel("The file discusses railway signals.");
+            await using var f=await Fixture.CreateAsync(root,model,openDocuments:open);
+            var nested=Path.Combine(root,"documents","subfolder");
+            Directory.CreateDirectory(nested);
+            await File.WriteAllTextAsync(Path.Combine(nested,"notes.TXT"),"RAILWAY_SIGNAL_SENTINEL");
+            await f.Engine.RespondAsync("Найди файл notes.txt","user",false,false,default);
+            Check.Equal(("notes.txt",false),open.Requests.Single());
+            Check.True(f.Output.Lines.Last().Contains("subfolder"),"Nested filename was not found.");
+            await f.Engine.RespondAsync("Прочитай notes.txt","user",false,false,default);
+            Check.True(model.Calls.Single().Messages.Last().Text.Contains("RAILWAY_SIGNAL_SENTINEL"),"File search did not read its match.");
+            await File.WriteAllTextAsync(Path.Combine(root,"documents","notes.txt"),"OTHER_SENTINEL");
+            await f.Engine.RespondAsync("Прочитай notes.txt","user",false,false,default);
+            Check.Equal(1,model.Calls.Count);
+            Check.True(f.Output.Lines.Last().Contains("More than one file matches"),"An ambiguous filename was read.");
+        });
+        await suite.Case("unavailable open document cannot silently fall back to an outdated disk copy",async root=>
+        {
+            var open=new OpenDocuments(new(null,"Select the matching Notepad tab."));
+            var model=new ScriptedModel();
+            await using var f=await Fixture.CreateAsync(root,model,openDocuments:open);
+            Directory.CreateDirectory(Path.Combine(root,"documents"));
+            await File.WriteAllTextAsync(Path.Combine(root,"documents","PVP1.txt"),"Disk copy.");
+            await f.Engine.RespondAsync("Read PVP1.txt","user",false,false,default);
+            Check.True(f.Output.Lines.Last().Contains("Select the matching Notepad tab"),"The live-read limitation was lost.");
+            Check.Equal(0,model.Calls.Count);
+            f.Config.Permissions.ReadFiles=false;
+            await f.Engine.RespondAsync("Read PVP1.txt","user",false,false,default);
+            Check.Equal(1,open.Requests.Count);
+            Check.True(f.Output.Lines.Last().Contains("File reading is disabled"),"Disabled file permissions were bypassed.");
         });
         await suite.Case("autonomous model decisions cannot execute requested tools or generate approval prompts", async root =>
         {
@@ -145,6 +234,18 @@ internal static class EngineTests
         }
     }
     private sealed record ModelCall(ChatMessage[] Messages, bool Json);
+    private sealed class ContextModel(string intent,string answer):IChatModel,ITurnContextModel
+    {
+        public List<IReadOnlyList<ChatMessage>> Classifications {get;}=[];
+        public List<IReadOnlyList<ChatMessage>> Answers {get;}=[];
+        public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct){Classifications.Add(messages.ToArray());return Task.FromResult(intent);}
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,bool json,CancellationToken ct){Answers.Add(messages.ToArray());return Task.FromResult(answer);}
+    }
+    private sealed class OpenDocuments(OpenTextDocument? document):IOpenDocumentReader
+    {
+        public List<(string Name,bool Read)> Requests {get;}=[];
+        public Task<OpenTextDocument?> FindAsync(string fileName,bool read,CancellationToken ct){Requests.Add((fileName,read));return Task.FromResult(document);}
+    }
     private sealed class CapturingOutput : ICompanionOutput
     {
         public List<string> Lines { get; } = [];
@@ -158,7 +259,7 @@ internal static class EngineTests
         public required AudioService Audio { get; init; }
         public required WeatherService Weather { get; init; }
         public required CapturingOutput Output { get; init; }
-        public static async Task<Fixture> CreateAsync(string root, IChatModel model)
+        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null)
         {
             var paths = new PortablePaths(root);
             var config = new AppConfig();
@@ -177,7 +278,7 @@ internal static class EngineTests
             return new Fixture
             {
                 Config = config, Memory = memory, Audio = audio, Weather = weather, Output = output,
-                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather) { Paused = true }
+                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,openDocuments:openDocuments,captureScreen:capture) { Paused = true }
             };
         }
         public async ValueTask DisposeAsync()

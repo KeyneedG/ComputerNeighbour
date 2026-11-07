@@ -11,34 +11,39 @@ public static class IntentRouter
     {
         var request=text.Trim();
         if(Regex.IsMatch(request,@"^[""'«“]|^(?:she said|he said|the phrase|explain the words|i might)\b",RegexOptions.IgnoreCase))return null;
-        request=Regex.Replace(request,"^(?:"+(string.IsNullOrWhiteSpace(characterName)?"":Regex.Escape(characterName)+"|")+@"Evelyn|Evelin|Эвелин\p{L}*)\s*[,!:]\s*","",RegexOptions.IgnoreCase);
-        for(var i=0;i<5;i++)request=Regex.Replace(request,@"^(?:please[,\s]+|can you[,\s]+|could you[,\s]+|можешь[,\s]+|пожалуйста[,\s]+)","",RegexOptions.IgnoreCase);
+        request=CommandText(request,characterName);
         if(Regex.IsMatch(request,@"^(?:don't|do not|не)\s+(?:read|open|search|browse|читай|чтени\p{L}*|открывай|ищи)\b",RegexOptions.IgnoreCase))return null;
         var literalCreate=Regex.Match(request,@"^(?:write|create|создай|запиши|напиши)(?:\s+(?:a\s+)?(?:file|файл))?\s+(?<path>[\p{L}\p{N}_.-]+[/\\][^\s|:]+)\s*(?::|\|)\s*(?<content>[\s\S]*)$",RegexOptions.IgnoreCase);
         if(literalCreate.Success)return New("create_file",new {path=literalCreate.Groups["path"].Value,content=literalCreate.Groups["content"].Value});
         var literalEdit=Regex.Match(request,@"^(?:edit|измени|отредактируй)(?:\s+(?:file|файл))?\s+(?<path>[\p{L}\p{N}_.-]+[/\\][^\s|]+)\s*\|\s*(?<old>[^|]+)\|(?<replacement>[\s\S]*)$",RegexOptions.IgnoreCase);
         if(literalEdit.Success)return New("edit_file",new {path=literalEdit.Groups["path"].Value,oldText=literalEdit.Groups["old"].Value.Trim(),newText=literalEdit.Groups["replacement"].Value.Trim()});
         var anyUrl=Regex.Match(request,@"https?://[^\s<>""']+",RegexOptions.IgnoreCase);
-        if(anyUrl.Success)return New("read_web",new {url=anyUrl.Value.TrimEnd('.',',',';',')',']')});
+        if(anyUrl.Success&&(anyUrl.Index==0||Regex.IsMatch(request,@"^(?:read|open|fetch|summari[sz]e|analy[sz]e|check|прочитай|прочитать|прочти|открой|открыть|посмотри|перескажи|изучи|расскажи|объясни)\b",RegexOptions.IgnoreCase)))
+            return New("read_web",new {url=anyUrl.Value.TrimEnd('.',',',';',')',']')});
         var browserTarget=Regex.IsMatch(request,@"\b(?:(?:current|active|this|open)\s+(?:(?:browser|web)\s+)?(?:browser|page|tab)|(?:in|from)\s+(?:the\s+)?browser|(?:текущ\p{L}*|активн\p{L}*|эт\p{L}*|открыт\p{L}*)\s+(?:страниц\p{L}*|вкладк\p{L}*|браузер\p{L}*)|(?:в|из)\s+браузер\p{L}*)\b|^(?:read|прочитай)\s+(?:the\s+)?(?:browser|браузер)\s*[.!?]?$",RegexOptions.IgnoreCase);
-        if(browserTarget&&Regex.IsMatch(request,@"\b(?:read|summari[sz]e|analy[sz]e|прочит\p{L}*|прочти|перескажи|изложи|оцен\p{L}*)\b",RegexOptions.IgnoreCase)&&!Regex.IsMatch(request,@"[\p{L}\p{N}_.-]+[/\\][\p{L}\p{N}_.-]+"))return New("read_browser",new{});
+        if(browserTarget&&Regex.IsMatch(request,@"\b(?:read|summari[sz]e|analy[sz]e|прочит\p{L}*|прочти|перескажи|изложи|оцен\p{L}*)\b|^(?:look at|check|посмотри|взгляни|проверь)\b",RegexOptions.IgnoreCase)&&!Regex.IsMatch(request,@"[\p{L}\p{N}_.-]+[/\\][\p{L}\p{N}_.-]+"))return New("read_browser",new{});
         var news=Regex.IsMatch(request,@"\bnews\b|новост|новость",RegexOptions.IgnoreCase);
-        var search=Regex.IsMatch(request,@"\b(?:search|look up|find)\b|найди|поищи|поискать|искать в интернет|погугли",RegexOptions.IgnoreCase);
+        var search=Regex.IsMatch(request,@"^(?:search|look up|find|google|найди|найти|поищи|поискать|погугли|погуглить)\b",RegexOptions.IgnoreCase);
         var recent=Regex.IsMatch(request,@"\b(?:latest|recent|fresh|today|new)\b|последн|свеж|актуальн|сегодня|новую|новые",RegexOptions.IgnoreCase);
-        if(news&&(search||recent))return New("search_web",new {query=SearchQuery(request,true),news=true});
-        if(search&&!Regex.IsMatch(request,@"\b(?:file|folder|directory)\b|файл|папк|каталог",RegexOptions.IgnoreCase))return New("search_web",new {query=SearchQuery(request,false),news=false});
-        if(Regex.IsMatch(request,@"^(?:read|summari[sz]e|прочитай|прочитать|прочти|перескажи|изучи)\b",RegexOptions.IgnoreCase))
+        var find=Regex.IsMatch(request,@"^(?:find|locate|найди|найти|поищи|поискать|где)\b",RegexOptions.IgnoreCase);
+        var read=Regex.IsMatch(request,@"^(?:read|summari[sz]e|look at|show the contents of|прочитай|прочитать|прочти|почитай|посмотри|глянь|покажи содержимое|перескажи|изучи)\b",RegexOptions.IgnoreCase);
+        if(read||find)
         {
-            var url=Regex.Match(request,@"https?://[^\s<>""']+",RegexOptions.IgnoreCase);
-            if(url.Success)return New("read_web",new {url=url.Value.TrimEnd('.',',',';',')',']')});
-            var file=Regex.Match(request,@"(?<path>[\p{L}\p{N}_.-]+[/\\][^\s""<>?]+)");
-            if(file.Success)return New("read_file",new {path=file.Groups["path"].Value.TrimEnd('.',',',';',')',']')});
-            if(Regex.IsMatch(request,@"\b(?:(?:current|active|this|open)\s+(?:(?:browser|web)\s+)?(?:browser|page|tab)|(?:in|from)\s+(?:the\s+)?browser|(?:текущ\p{L}*|активн\p{L}*|эт\p{L}*|открыт\p{L}*)\s+(?:страниц\p{L}*|вкладк\p{L}*|браузер\p{L}*)|(?:в|из)\s+браузер\p{L}*)\b|^(?:read|прочитай)\s+(?:the\s+)?(?:browser|браузер)\s*[.!?]?$",RegexOptions.IgnoreCase))return New("read_browser",new{});
+            var file=Regex.Match(request,@"[""«“](?<path>[^""»”\r\n]+\.[\p{L}\d]{1,8})[""»”]|(?<![\p{L}\p{N}_./\\-])(?<path>(?:[A-Za-z]:)?(?:[\p{L}\p{N}_.-]+[/\\]|[/\\])*(?:[\p{L}\p{N}_.-]+)\.[\p{L}\d]{1,8})(?![\p{L}\p{N}_/\\-])");
+            if(file.Success)
+            {
+                var path=file.Groups["path"].Value;
+                var openOnly=read&&Regex.IsMatch(request,@"\bnotepad\b|блокнот",RegexOptions.IgnoreCase);
+                return New(read?"read_file":"find_file",new {path,openOnly});
+            }
         }
-        var create=Regex.Match(request,@"^(?:write|create|создай|запиши|напиши)(?:\s+(?:a\s+)?(?:file|файл))?\s+(?<path>[\p{L}\p{N}_.-]+[/\\][^\s|:]+)\s*(?::|\|)\s*(?<content>[\s\S]*)$",RegexOptions.IgnoreCase);
-        if(create.Success)return New("create_file",new {path=create.Groups["path"].Value,content=create.Groups["content"].Value});
-        var edit=Regex.Match(request,@"^(?:edit|измени|отредактируй)(?:\s+(?:file|файл))?\s+(?<path>[\p{L}\p{N}_.-]+[/\\][^\s|]+)\s*\|\s*(?<old>[^|]+)\|(?<replacement>[\s\S]*)$",RegexOptions.IgnoreCase);
-        if(edit.Success)return New("edit_file",new {path=edit.Groups["path"].Value,oldText=edit.Groups["old"].Value.Trim(),newText=edit.Groups["replacement"].Value.Trim()});
+        if(news&&(search||recent&&(read||Regex.IsMatch(request,@"\b(?:please|пожалуйста|можешь)\s+(?:open|read|откр?ой|прочти)\b",RegexOptions.IgnoreCase))))
+            return New("search_web",new {query=SearchQuery(request,true),news=true});
+        if(search&&!Regex.IsMatch(request,@"\b(?:file|folder|directory)\b|файл|папк|каталог",RegexOptions.IgnoreCase))
+        {
+            var query=SearchQuery(request,false);
+            if(query.Length>0&&!IsWebCorrection(request))return New("search_web",new {query,news=false});
+        }
         var open=Regex.Match(request,@"^(?:open|launch|start|открой|открыть|запусти|запустить)\s+(?<name>.+?)[.!?]*$",RegexOptions.IgnoreCase);
         if(open.Success)
         {
@@ -50,6 +55,13 @@ public static class IntentRouter
         }
         return null;
     }
+    internal static string CommandText(string text,string? characterName=null)
+    {
+        var request=Regex.Replace(text.Trim(),"^(?:"+(string.IsNullOrWhiteSpace(characterName)?"":Regex.Escape(characterName)+"|")+@"Evelyn|Evelin|Эвелин\p{L}*)\s*[,!:]\s*","",RegexOptions.IgnoreCase);
+        return Regex.Replace(request,@"^(?:(?:please|can you|could you|would you|можешь|могла бы|пожалуйста)[,\s]+)+","",RegexOptions.IgnoreCase);
+    }
+    internal static bool IsWebCorrection(string text)=>WebFollowupPrefix(text).Success;
+    internal static Match WebFollowupPrefix(string text)=>Regex.Match(text,@"^(?:(?:no|actually|неа|нет|вообще-то)[,!\s]+)?(?:(?:check|look|search)\s+(?:on the (?:web|internet)|online)|(?:look it up|google it)(?:\s+(?:on the (?:web|internet)|online))?|(?:посмотри|проверь|поищи|найди|поискать|искать)\s+(?:это\s+)?(?:в интернете|в сети|в гугле|онлайн)|погугли это)\b",RegexOptions.IgnoreCase);
     public static bool IsSourceFollowup(string text)=>Regex.IsMatch(text,@"^\s*(?:sources?|citation|reference|источник\p{L}*)\s*[?!]?$|\b(?:give|show|send|provide|attach|where)\b.{0,50}\b(?:source|sources|link|url|citation)\b|(?:дай|покажи|прилож|можешь|где|какой).{0,60}(?:источник|исчтоник|ссылк)",RegexOptions.IgnoreCase);
     private static string SearchQuery(string request,bool news)
     {
@@ -60,10 +72,10 @@ public static class IntentRouter
         }
         if(news&&Regex.IsMatch(request,@"technolog|\btech\b|техник|технолог",RegexOptions.IgnoreCase))return "latest technology news";
         if(news&&Regex.IsMatch(request,@"прочти\s+новую|read\s+(?:a\s+)?new\s+|latest\s+news\s*[.!?]?$",RegexOptions.IgnoreCase))return "latest technology news";
-        var start=Regex.Match(request,@"\b(?:search(?:\s+for)?|look up|find)\s+|(?:найди|поищи|погугли)\s+",RegexOptions.IgnoreCase);
-        var query=start.Success?request[(start.Index+start.Length)..]:request;
+        var start=Regex.Match(request,@"^(?:search(?:\s+for)?|look up|find|google|найди|найти|поищи|поискать|погугли|погуглить)(?:\s+|$)",RegexOptions.IgnoreCase);
+        var query=start.Success?request[start.Length..]:request;
         query=Regex.Replace(query,@"\b(?:in the internet|on the internet|on the web|в интернете|пожалуйста)\b","",RegexOptions.IgnoreCase).Trim(' ','.','?','!');
         return query[..Math.Min(query.Length,500)];
     }
-    private static ToolRequest New(string name,object args)=>new(name,JsonSerializer.Deserialize<Dictionary<string,JsonElement>>(JsonSerializer.Serialize(args)));
+    internal static ToolRequest New(string name,object args)=>new(name,JsonSerializer.Deserialize<Dictionary<string,JsonElement>>(JsonSerializer.Serialize(args)));
 }

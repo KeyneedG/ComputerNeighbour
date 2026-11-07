@@ -17,7 +17,7 @@ namespace ComputerNeighbour.Tests;
 /// <summary>Optional real-model check; all sample user data stays in an isolated portable fixture.</summary>
 internal static class FeatureModelSmoke
 {
-    public static async Task<int> RunAsync(PortablePaths portable)
+    public static async Task<int> RunAsync(PortablePaths portable,string? redScreenFixture=null)
     {
         var root=portable.Inside("data/development-checks/feature-smoke-"+DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         var paths=new PortablePaths(root);Directory.CreateDirectory(root);
@@ -37,7 +37,9 @@ internal static class FeatureModelSmoke
             var emotions=new EmotionEngine(root);await emotions.InitializeAsync(ct);
             await using var audio=new AudioService(root,config.Audio);using var weather=new WeatherService(config);
             var output=new Output();
-            await using var engine=new CompanionEngine(paths,config,model,memory,emotions,new WindowsDesktop(config.Desktop),audio,output,weather,new SampleBrowser()) {Paused=true,Muted=true};
+            Func<byte[]>? capture=null;
+            if(redScreenFixture is not null)capture=()=>File.ReadAllBytes(portable.Inside(redScreenFixture));
+            await using var engine=new CompanionEngine(paths,config,model,memory,emotions,new WindowsDesktop(config.Desktop),audio,output,weather,new SampleBrowser(),captureScreen:capture) {Paused=true,Muted=true};
             await engine.RespondAsync("I value your honest opinions and I will respect your boundaries. Respond briefly, and update your current attitude toward me from this actual interaction.","user",false,false,ct);
             using(var relationship=JsonDocument.Parse(await File.ReadAllTextAsync(paths.Inside("data/personality/relationship.json"),ct)))
             {
@@ -55,6 +57,16 @@ internal static class FeatureModelSmoke
             var summary=memory.Recent.Last(e=>e.Role=="assistant").Text;
             Check.True(summary.Contains("folder",StringComparison.OrdinalIgnoreCase)&&summary.Contains("backup",StringComparison.OrdinalIgnoreCase),"The browser summary omitted the synthetic page facts.");
             Console.WriteLine("PASS real model summary of synthetic accessible browser source: "+summary);
+            if(capture is not null)
+            {
+                config.Permissions.ScreenCapture=true;
+                engine.Paused=false;
+                await engine.RespondAsync("Tell me what color fills the view on my screen right now.","user",false,false,ct);
+                Check.True(memory.Recent.Last(e=>e.Role=="assistant").Text.Contains("red",StringComparison.OrdinalIgnoreCase),"The real vision model did not identify the color of the supplied test image.");
+                await engine.RespondAsync("Так ты действительно видела мой экран?","user",false,false,ct);
+                Check.True(memory.Recent.Last(e=>e.Role=="assistant").Text.Contains("took a real screenshot"),"The verified vision result was lost on the next turn.");
+                Console.WriteLine("PASS real model vision with synthetic image and grounded follow-up.");
+            }
             Console.WriteLine("Feature smoke artifacts: "+root);
             return 0;
         }

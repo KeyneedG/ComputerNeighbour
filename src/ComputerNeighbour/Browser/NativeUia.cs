@@ -116,17 +116,17 @@ internal sealed class NativeUia : IDisposable
 
     internal static string? WebAddress(string? value) => BrowserAddress.Normalize(value);
 
-    internal string ReadDocumentText(ComPointer document, int limit, CancellationToken token)
+    internal string? ReadDocumentText(ComPointer document, int limit, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var iid = new Guid("32eba289-3583-42c9-9c59-3b6d9a1e9b6a");
-        if (Method<GetPatternAsDelegate>(document, 14)(document.Handle, 10014, ref iid, out var patternPointer) < 0 || patternPointer == IntPtr.Zero) return "";
+        if (Method<GetPatternAsDelegate>(document, 14)(document.Handle, 10014, ref iid, out var patternPointer) < 0 || patternPointer == IntPtr.Zero) return null;
         using var pattern = new ComPointer(patternPointer);
-        if (Method<GetPointerDelegate>(pattern, 7)(pattern.Handle, out var rangePointer) < 0 || rangePointer == IntPtr.Zero) return "";
+        if (Method<GetPointerDelegate>(pattern, 7)(pattern.Handle, out var rangePointer) < 0 || rangePointer == IntPtr.Zero) return null;
         using var range = new ComPointer(rangePointer);
         token.ThrowIfCancellationRequested();
         var result = Method<GetTextDelegate>(range, 12)(range.Handle, limit, out var bstr);
-        try { return result >= 0 && bstr != IntPtr.Zero ? Marshal.PtrToStringBSTR(bstr) : ""; }
+        try { return result < 0 ? null : bstr == IntPtr.Zero ? "" : Marshal.PtrToStringBSTR(bstr); }
         finally { if (bstr != IntPtr.Zero) Marshal.FreeBSTR(bstr); }
     }
 

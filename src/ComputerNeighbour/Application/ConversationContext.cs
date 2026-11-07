@@ -63,6 +63,13 @@ public static class ReplyQuality
         return Regex.IsMatch(answer,@"\b(?:your name is|you are|you're)\s+"+Regex.Escape(assistant)+@"\b",RegexOptions.IgnoreCase);
     }
     public static bool DeniesPersistentMemory(string answer)=>Regex.IsMatch(answer,@"\b(?:no|don't have|do not have|cannot retain|can't retain)\s+(?:any\s+)?(?:persistent\s+|long.term\s+)?memor(?:y|ies)\b.{0,70}\b(?:sessions|restarts|conversations)\b",RegexOptions.IgnoreCase);
+    public static bool DeniesToolAccess(string answer,bool screen,bool files,bool web)
+    {
+        const string denial=@"\bI (?:cannot|can['’]t|could not|couldn['’]t|do not|don['’]t|did not|didn['’]t|am unable to|only)\s+";
+        return screen&&Regex.IsMatch(answer,denial+@"(?:actually |directly |really )?(?:see|view|access|look at|have access to|receive|take)\s+(?:any |a |the |your |this )?(?:screen\b|desktop\b|screenshot\b|image\b)",RegexOptions.IgnoreCase)
+            ||files&&Regex.IsMatch(answer,denial+@"(?:(?:read|open|access|have access to) (?:any |your |local |the )?(?:files|file system)|(?:read|process|see) (?:what|text) you paste)",RegexOptions.IgnoreCase)
+            ||web&&Regex.IsMatch(answer,denial+@"(?:actually |directly )?(?:browse|search|access|have access to|use)\s+(?:the )?(?:live )?(?:web|internet|online)",RegexOptions.IgnoreCase);
+    }
     public static string Normalize(string text)=>Regex.Replace(text.ToLowerInvariant(),@"[^\p{L}\p{N}]+"," ").Trim();
     public static bool IsRepeated(string first,string second)
     {

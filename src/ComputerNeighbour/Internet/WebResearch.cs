@@ -10,6 +10,7 @@ namespace ComputerNeighbour.Internet;
 public sealed class InternetOptions
 {
     public string SearchProvider { get; set; }="auto";
+    public bool LookupUnfamiliarTerms { get; set; }=true;
     public int MaxResults { get; set; }=5;
     public int MaxArticles { get; set; }=2;
     public int MaxArticleCharacters { get; set; }=16000;

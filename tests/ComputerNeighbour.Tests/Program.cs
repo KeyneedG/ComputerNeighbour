@@ -8,7 +8,8 @@ internal static class TestRunner
     {
         var portable = PortablePaths.Discover([]);
         portable.InitializeEnvironment();
-        if(args.Contains("--feature-smoke"))return await FeatureModelSmoke.RunAsync(portable);
+        if(Array.IndexOf(args,"--feature-smoke") is var feature&&feature>=0)
+            return await FeatureModelSmoke.RunAsync(portable,feature+1<args.Length?args[feature+1]:null);
         if(args.Contains("--dialogue-smoke"))return await DialogueModelSmoke.RunAsync(portable);
         if(args.Contains("--web-smoke"))return await WebModelSmoke.RunAsync(portable);
         var runRoot = portable.Inside("data/test-runs/" + Guid.NewGuid().ToString("N"));

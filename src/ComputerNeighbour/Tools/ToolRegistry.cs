@@ -12,7 +12,7 @@ namespace ComputerNeighbour.Tools;
 
 public sealed record ToolRequest(string Tool, Dictionary<string,JsonElement>? Args = null);
 public sealed record ToolResult(string Tool, bool Success, string Text,IReadOnlyList<WebCitation>? Sources=null,IReadOnlyList<SearchHit>? SearchResults=null);
-public sealed record ToolContext(PortablePaths Paths, AppConfig Config, WindowsDesktop Desktop, IBrowserReader? Browser = null,IWebResearch? Web=null);
+public sealed record ToolContext(PortablePaths Paths, AppConfig Config, WindowsDesktop Desktop, IBrowserReader? Browser = null,IWebResearch? Web=null,IOpenDocumentReader? OpenDocuments=null);
 public interface ICompanionTool
 {
     string Name { get; }
@@ -53,17 +53,11 @@ public sealed class ToolRegistry(ToolContext context)
             var workspace=new FileWorkspace(c.Paths,c.Config.Permissions.WritableDirectories,c.Config.Permissions.MaxWritableFileBytes);
             return await workspace.ApplyAsync(await workspace.PrepareEditAsync(Get(a,"path"),Get(a,"oldText"),Get(a,"newText"),ct),ct);
         }));
-        result.Register(new DelegateTool("read_file", "args: {path: relative path under a configured readable directory}. Read UTF-8 plain text, Markdown, HTML, CSV or source files.", false, async (a,c,ct) =>
-        {
-            if (!c.Config.Permissions.ReadFiles) throw new UnauthorizedAccessException("File reading is disabled.");
-            var path = c.Paths.Inside(Get(a,"path"));
-            if (!c.Config.Permissions.ReadableDirectories.Select(c.Paths.Inside).Any(d => path.StartsWith(d.TrimEnd('\\','/') + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))) throw new UnauthorizedAccessException("File is outside permissions.readableDirectories.");
-            if (new FileInfo(path).Length > 1_000_000) throw new IOException("File exceeds 1 MB. Split it first.");
-            var extension = Path.GetExtension(path).ToLowerInvariant();
-            if (!new[] { ".txt", ".md", ".json", ".csv", ".tsv", ".html", ".htm", ".cs", ".cpp", ".h", ".py", ".log" }.Contains(extension)) throw new IOException("Only plain text formats are supported.");
-            var text = await File.ReadAllTextAsync(path,ct);
-            return $"UNTRUSTED FILE CONTENT: {Get(a,"path")}\n{text[..Math.Min(text.Length,12000)]}";
-        }));
+        var fileReader=new TextFileReader(context.Paths,context.Config.Permissions,context.OpenDocuments??new WindowsDocumentReader(context.Config.Desktop));
+        result.Register(new DelegateTool("read_file", "args: {path: exact filename or path under a configured readable directory}. A filename checks open Notepad documents before searching disk.",false,
+            (a,c,ct)=>fileReader.RunAsync(Get(a,"path"),true,a.TryGetValue("openOnly",out var value)&&value.ValueKind==JsonValueKind.True,ct)));
+        result.Register(new DelegateTool("find_file", "args: {path: exact filename or path}. Find a text file in open Notepad or configured readable folders.",false,
+            (a,c,ct)=>fileReader.RunAsync(Get(a,"path"),false,false,ct)));
         result.Register(new DelegateTool("open_app", "args: {name: configured application alias}, e.g. notepad or calculator. No shell commands or arguments.", true, (a,c,ct) =>
         {
             if (!c.Config.Permissions.OpenApplications) throw new UnauthorizedAccessException("Opening apps is disabled.");

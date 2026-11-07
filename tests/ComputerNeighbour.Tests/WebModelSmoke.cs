@@ -55,7 +55,16 @@ internal static class WebModelSmoke
                 var history=new SourceHistory(paths);await history.InitializeAsync(ct);
                 Check.True(history.Sources.Count>0&&history.Sources.All(s=>s.Kind is "article" or "search-result"),"No real news evidence persisted.");
                 Console.WriteLine("PASS actual model article/news summaries and saved source follow-up.");
-                await File.WriteAllTextAsync(paths.Inside("report.json"),JsonSerializer.Serialize(new{passed=true,search,articleTitle=article.Title,articleLength=article.Text.Length,summary,news,sources=history.Sources},AppConfig.Json),ct);
+                await engine.RespondAsync("что такое foid в сленге?","user",false,false,ct);
+                var definition=memory.Recent.Last(e=>e.Role=="assistant").Text;
+                Check.True(definition.Contains("incel",StringComparison.OrdinalIgnoreCase)&&definition.Contains("women",StringComparison.OrdinalIgnoreCase)
+                    &&definition.Contains("https://")&&!definition.Contains("foodie",StringComparison.OrdinalIgnoreCase),"Live slang lookup did not give the supported definition.");
+                await engine.RespondAsync("Так ты все таки смогла поискать, вот это да","user",false,false,ct);
+                Check.True(memory.Recent.Last(e=>e.Role=="assistant").Text.Contains("I searched the live web"),"The model denied the completed search.");
+                await engine.RespondAsync("Что видно в этом окне сейчас?","user",false,false,ct);
+                Check.True(memory.Recent.Last(e=>e.Role=="assistant").Text.Contains("Screen observation is paused"),"The real context classifier missed an indirect screen request.");
+                Console.WriteLine("PASS live slang definition, lookup acknowledgment and real context classification.");
+                await File.WriteAllTextAsync(paths.Inside("report.json"),JsonSerializer.Serialize(new{passed=true,search,articleTitle=article.Title,articleLength=article.Text.Length,summary,news,definition,sources=history.Sources},AppConfig.Json),ct);
             }
             Console.WriteLine("Web smoke artifacts: "+root);return 0;
         }

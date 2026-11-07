@@ -14,8 +14,18 @@ public interface IChatModel
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,ct);
 }
 
-public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, IAsyncDisposable
+public interface ITurnContextModel
 {
+    Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct);
+}
+
+public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, ITurnContextModel, IAsyncDisposable
+{
+    private static readonly JsonElement ContextSchema=JsonSerializer.Deserialize<JsonElement>("""
+    {"type":"object","additionalProperties":false,"required":["intent"],"properties":{
+      "intent":{"type":"string","enum":["chat","screen","screen_followup","file_capability","web_capability","lookup_term"]}
+    }}
+    """);
     private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>("""
     {"type":"object","additionalProperties":false,"required":["speak","reply","memory","emotion","relationship","actions"],"properties":{
       "speak":{"type":"boolean"},"reply":{"type":"string","maxLength":4000},"memory":{"type":"string","maxLength":1000},
@@ -75,13 +85,14 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     }
     public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct)=>RequestAsync(messages,json,json?0.25:0.25,false,ct);
     public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct);
-    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct)
+    public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,64);
+    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null)
     {
-        messages = await FitContextAsync(messages, json ? options.MaxReplyTokens : 1800, ct);
+        messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);
         var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:image/png;base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
-        var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = json||dialogue ? options.MaxReplyTokens : 1800, ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = false } };
+        var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = maxTokens??(json||dialogue ? options.MaxReplyTokens : 1800), ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = false } };
         if(dialogue){body["repeat_penalty"]=1.1;body["repeat_last_n"]=256;body["top_p"]=0.9;}
-        if (json) body["response_format"] = new { type = "json_object", schema=DecisionSchema };
+        if (json) body["response_format"] = new { type = "json_object", schema=schema??DecisionSchema };
         using var response = await client.PostAsJsonAsync("v1/chat/completions", body, ct);
         if (!response.IsSuccessStatusCode)
         {

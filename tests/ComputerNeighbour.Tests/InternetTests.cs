@@ -149,6 +149,34 @@ internal static class InternetTests
             await f.Engine.RespondAsync("Search for Vulkan documentation","user",false,false,default);
             Check.Equal("Vulkan documentation",web.Searches.Single().Query);Check.True(!web.Searches[0].Query.Contains("PRIVATE_HISTORY"),"Conversation data leaked into the query.");
         });
+        await suite.Case("slang query and corrective follow-up search only the public term; acknowledgment does not search",async root=>
+        {
+            var model=new FakeModel("Это русский текст без перевода.","", "The retrieved sources do not define this term.");
+            var web=new FakeWeb();
+            await using var f=await Fixture.Create(root,model,web:web);
+            await f.Memory.AppendAsync("user","PRIVATE_HISTORY_SENTINEL personal details","user");
+            await f.Engine.RespondAsync("что такое foid в сленге?","user",false,false,default);
+            Check.Equal("foid slang meaning",web.Searches.Single().Query);
+            Check.True(f.Output.Lines[^2].Contains("I'll look that up"),"The lookup was not announced.");
+            Check.True(f.Output.Lines.Last().Contains("couldn't put together")&&f.Output.Lines.Last().Contains("https://example.org/real-news"),"Invalid model output discarded verified retrieval.");
+            await f.Engine.RespondAsync("Неа, посмотри в интернете, что это значит на самом деле","user",false,false,default);
+            Check.Equal(2,web.Searches.Count);
+            Check.True(web.Searches.All(search=>search.Query=="foid slang meaning"),"The corrective request leaked chat text or lost the term.");
+            Check.True(model.Messages!.Last().Text.Contains("define foid"),"The answer model didn't receive the resolved term.");
+            await f.Engine.RespondAsync("Так ты все таки смогла поискать, вот это да","user",false,false,default);
+            Check.Equal(2,web.Searches.Count);
+            Check.Equal(3,model.Calls);
+            Check.True(f.Output.Lines.Last().Contains("I searched the live web"),"The completed lookup was denied.");
+        });
+        await suite.Case("an anaphoric search never sends another speaker's words to a provider",async root=>
+        {
+            var web=new FakeWeb();
+            await using var f=await Fixture.Create(root,new FakeModel(),web:web);
+            await f.Memory.AppendAsync("user","What does other-speaker-term mean?","guest");
+            await f.Engine.RespondAsync("Неа, посмотри в интернете, что это значит на самом деле","user",false,false,default);
+            Check.Equal(0,web.Searches.Count);
+            Check.True(f.Output.Lines.Last().Contains("What term"),"A missing target did not ask for clarification.");
+        });
         await suite.Case("the explicit forget command also resets saved source follow-ups",async root=>
         {
             await using var f=await Fixture.Create(root,new FakeModel("The actual page summary."),web:new FakeWeb());

@@ -47,6 +47,15 @@ public static class Program
                 var page=await new WindowsBrowserReader(config.Browser,config.Desktop,config.Permissions.ReadWeb).ReadAsync(shutdown.Token);
                 ui.Write($"Browser: {page.Browser}\nTitle: {page.Title}\nURL: {page.Url??"unavailable"}\nRead method: {page.ReadMethod}\nReadable characters: {page.Text.Length}\nTruncated: {page.Truncated}");return 0;
             }
+            var documentDiagnosis=Array.IndexOf(args,"--document-diagnose");
+            if(documentDiagnosis>=0)
+            {
+                if(!config.Permissions.ReadFiles||!config.Permissions.ReadOpenDocuments)throw new UnauthorizedAccessException("Open Notepad document reading is disabled.");
+                if(documentDiagnosis+1>=args.Length||Path.GetFileName(args[documentDiagnosis+1])!=args[documentDiagnosis+1])throw new ArgumentException("--document-diagnose requires a Notepad filename.");
+                var document=await new WindowsDocumentReader(config.Desktop).FindAsync(args[documentDiagnosis+1],true,shutdown.Token);
+                if(document?.Text is not {} text)throw new IOException(document?.UnavailableReason??"No matching open Notepad tab was found.");
+                ui.Write($"Notepad: matched requested filename.\nReadable characters: {Math.Min(text.Length,12000)}\nTruncated: {text.Length>12000}");return 0;
+            }
             if(args.Contains("--diagnose")) { Diagnose(paths,config,audio,ui);return 0; }
             var memory=new MemoryStore(paths.Root,config.Memory);await memory.InitializeAsync(shutdown.Token);
             var emotions=new EmotionEngine(paths.Root);await emotions.InitializeAsync(shutdown.Token);
@@ -173,7 +182,7 @@ public static class Program
     Hold F10 (configurable) to record; release to transcribe. Ctrl+C or /exit to quit.
     /look          Analyse current screen
     /browser       Read and summarise the current/last active browser tab
-    /read URL      Fetch and read a public article
+    /read TARGET   Read a public URL or a text filename/path
     /search QUERY  Search the live internet, read results and show source URLs
     /news [TOPIC]  Find recent news (technology by default)
     /sources       Show verified links from the last lookup

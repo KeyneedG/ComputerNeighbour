@@ -56,7 +56,7 @@ public sealed class AppConfig
             throw new InvalidDataException("Invalid audio device, sample rate, hotkey, speed or speaker threshold.");
         if (Model.Threads<1 || !double.IsFinite(Model.Temperature) || Model.Temperature is <0 or >2 || Model.StartupTimeoutSeconds<5)
             throw new InvalidDataException("Invalid model threads, temperature or startup timeout.");
-        foreach (var directory in Permissions.ReadableDirectories) paths.Inside(directory);
+        foreach (var directory in Permissions.ReadableDirectories) Tools.TextFileReader.ReadableRoot(paths,directory);
         foreach (var directory in Permissions.WritableDirectories) paths.Inside(directory);
         if(Permissions.MaxWritableFileBytes is <1024 or >10_000_000 || Browser.MaxCharacters is <1000 or >100_000 || Browser.ReadTimeoutSeconds is <1 or >60)
             throw new InvalidDataException("Invalid file size or browser read limits.");
@@ -112,6 +112,7 @@ public sealed class PermissionOptions
     public bool ReadWeb { get; set; } = true;
     public bool SearchWeb { get; set; } = true;
     public bool ReadFiles { get; set; } = true;
+    public bool ReadOpenDocuments { get; set; } = true;
     public bool WriteFiles { get; set; } = true;
     public bool ReadBrowser { get; set; } = true;
     public bool AllowAutonomousFileActions { get; set; } = true;

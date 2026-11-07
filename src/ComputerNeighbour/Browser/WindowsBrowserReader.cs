@@ -97,7 +97,7 @@ public sealed class WindowsBrowserReader : IBrowserReader
             if (automation.GetBoolean(document, NativeUia.IsOffscreenProperty) == true || automation.GetBoolean(document, NativeUia.IsPasswordProperty) == true) continue;
             documentUrl ??= NativeUia.WebAddress(automation.GetString(document, NativeUia.ValueProperty));
             // TextPattern covers actual document text, including off-viewport text exposed by the provider.
-            text = automation.ReadDocumentText(document, options.MaxCharacters + 1, token);
+            text = automation.ReadDocumentText(document, options.MaxCharacters + 1, token) ?? "";
             if (string.IsNullOrWhiteSpace(text))
             {
                 text = automation.ReadAccessibleText(document, options.MaxCharacters + 1, token, out var accessibilityTruncated);
