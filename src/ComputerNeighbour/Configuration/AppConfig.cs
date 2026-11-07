@@ -2,6 +2,7 @@ using System.Text.Json;
 using ComputerNeighbour.Audio;
 using ComputerNeighbour.Memory;
 using ComputerNeighbour.Platform;
+using ComputerNeighbour.Browser;
 
 namespace ComputerNeighbour.Configuration;
 
@@ -18,6 +19,7 @@ public sealed class AppConfig
     public ProactiveOptions Proactive { get; set; } = new();
     public PermissionOptions Permissions { get; set; } = new();
     public WeatherOptions Weather { get; set; } = new();
+    public BrowserOptions Browser { get; set; } = new();
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true, ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
 
     public static AppConfig Load(PortablePaths paths)
@@ -32,7 +34,7 @@ public sealed class AppConfig
 
     public void Validate(PortablePaths paths)
     {
-        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Permissions is null || Weather is null)
+        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Permissions is null || Weather is null || Browser is null)
             throw new InvalidDataException("Configuration sections cannot be null.");
         if (string.IsNullOrWhiteSpace(CharacterName) || CharacterName.Length>80 || string.IsNullOrWhiteSpace(UserName) || UserName.Length>80)
             throw new InvalidDataException("Character/user names must contain 1–80 characters.");
@@ -46,13 +48,16 @@ public sealed class AppConfig
             throw new InvalidDataException("Invalid observation / audio interval.");
         if (Weather.Latitude is < -90 or > 90 || Weather.Longitude is < -180 or > 180 || Weather.RefreshMinutes < 10)
             throw new InvalidDataException("Invalid weather location / interval.");
-        if (Permissions.ReadableDirectories is null || Permissions.AllowedApplications is null || Desktop.ExcludedWindowTitles is null)
+        if (Permissions.ReadableDirectories is null || Permissions.WritableDirectories is null || Permissions.AllowedApplications is null || Desktop.ExcludedWindowTitles is null || Browser.AllowedProcesses is null)
             throw new InvalidDataException("Permission lists cannot be null.");
         if (Audio.SampleRate!=16000 || Audio.PushToTalkVirtualKey is <1 or >254 || Audio.InputDeviceId < -1 || Audio.OutputDeviceId < -1 || !double.IsFinite(Audio.SpeechRate) || Audio.SpeechRate is <0.5 or >2 || !double.IsFinite(Audio.SpeakerMatchThreshold))
             throw new InvalidDataException("Invalid audio device, sample rate, hotkey, speed or speaker threshold.");
         if (Model.Threads<1 || !double.IsFinite(Model.Temperature) || Model.Temperature is <0 or >2 || Model.StartupTimeoutSeconds<5)
             throw new InvalidDataException("Invalid model threads, temperature or startup timeout.");
         foreach (var directory in Permissions.ReadableDirectories) paths.Inside(directory);
+        foreach (var directory in Permissions.WritableDirectories) paths.Inside(directory);
+        if(Permissions.MaxWritableFileBytes is <1024 or >10_000_000 || Browser.MaxCharacters is <1000 or >100_000 || Browser.ReadTimeoutSeconds is <1 or >60)
+            throw new InvalidDataException("Invalid file size or browser read limits.");
         foreach (var path in new[] { CharacterFile, Model.Executable, Model.ModelFile, Model.ProjectorFile, Audio.WhisperExecutable, Audio.WhisperModel, Audio.PiperExecutable, Audio.PiperModel })
             paths.Inside(path);
     }
@@ -101,11 +106,18 @@ public sealed class PermissionOptions
     public bool SystemStatus { get; set; } = true;
     public bool ReadWeb { get; set; } = true;
     public bool ReadFiles { get; set; } = true;
+    public bool WriteFiles { get; set; } = true;
+    public bool ReadBrowser { get; set; } = true;
+    public bool AllowAutonomousFileActions { get; set; } = true;
+    public bool FullFileAccess { get; set; } = false;
+    public bool ConfirmFileChanges { get; set; } = true;
+    public int MaxWritableFileBytes { get; set; } = 1_000_000;
     public bool OpenApplications { get; set; } = true;
     public bool DesktopInput { get; set; } = false;
     public bool ConfirmActions { get; set; } = true;
     public bool WeatherNetwork { get; set; } = false;
     public List<string> ReadableDirectories { get; set; } = ["documents"];
+    public List<string> WritableDirectories { get; set; } = ["documents"];
     public Dictionary<string,string> AllowedApplications { get; set; } = new() { ["notepad"] = "notepad.exe", ["calculator"] = "calc.exe" };
 }
 public sealed class WeatherOptions

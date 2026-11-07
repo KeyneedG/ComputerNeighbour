@@ -28,7 +28,7 @@ public static class Program
             var config=AppConfig.Load(paths);
             var desktop=new WindowsDesktop(config.Desktop);
             await using var audio=new AudioService(paths.Root,config.Audio);
-            if(args.Contains("--init")) { ui.Write("Configuration created: "+paths.Inside("config/appsettings.json"));return 0; }
+            if(args.Contains("--init")) { await new RelationshipStore(paths.Root,config.UserName).InitializeAsync(shutdown.Token);ui.Write("Configuration ready: "+paths.Inside("config/appsettings.json")+"\nRelationship ready: "+paths.Inside("data/personality/relationship.json"));return 0; }
             if(args.Contains("--devices")) { ui.Write(audio.DescribeDevices());return 0; }
             if(args.Contains("--diagnose")) { Diagnose(paths,config,audio,ui);return 0; }
             var memory=new MemoryStore(paths.Root,config.Memory);await memory.InitializeAsync(shutdown.Token);
@@ -38,13 +38,14 @@ public static class Program
             await model.StartAsync(shutdown.Token);
             using var weather=new WeatherService(config);
             await using var engine=new CompanionEngine(paths,config,model,memory,emotions,desktop,audio,ui,weather);
+            await engine.GetRelationshipAsync(shutdown.Token);
             var keyName=config.Audio.PushToTalkVirtualKey is >=0x70 and <=0x87?$"F{config.Audio.PushToTalkVirtualKey-0x6F}":$"VK 0x{config.Audio.PushToTalkVirtualKey:X2}";
             ui.Write($"Ready. Type English or Russian. Hold {keyName} to talk. Replies are English.\nMicrophone={config.Permissions.Microphone}; screen={config.Permissions.ScreenCapture}; computer input={config.Permissions.DesktopInput}.");
             if(memory.RecoveryNotice is {} notice)ui.Write(notice);
             var queue=Channel.CreateBounded<AppEvent>(new BoundedChannelOptions(16) { SingleReader=true,FullMode=BoundedChannelFullMode.Wait });
             var input=ReadInputAsync(queue.Writer,ui,engine,shutdown.Token);
             var microphone=MicrophoneAsync(queue.Writer,config,desktop,audio,ui,engine,shutdown.Token);
-            var timer=TimerAsync(queue.Writer,config,shutdown.Token);
+            var timer=TimerAsync(queue.Writer,config,engine,shutdown.Token);
             var lastWindow="";var wasAway=false;var nextOpportunity=DateTimeOffset.Now.AddSeconds(config.Proactive.MinIntervalSeconds);var lastOpportunity=DateTimeOffset.MinValue;
             try
             {
@@ -69,6 +70,10 @@ public static class Program
                                 case "/approve": if(int.TryParse(arg,out var approve))await engine.ApproveAsync(approve,shutdown.Token);else ui.Write("Usage: /approve NUMBER");break;
                                 case "/reject": if(int.TryParse(arg,out var reject))engine.Reject(reject);else ui.Write("Usage: /reject NUMBER");break;
                                 case "/memory": ui.Write("Durable memory:\n"+memory.Summary);break;
+                                case "/relationship": ui.Write(await engine.GetRelationshipAsync(shutdown.Token));break;
+                                case "/browser": await engine.RespondAsync("Read the current browser page and summarize it.","user",false,false,shutdown.Token);break;
+                                case "/write":case "/create": await engine.RespondAsync("write "+arg,"user",false,false,shutdown.Token);break;
+                                case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
                                 case "/forget": if(arg=="CONFIRM") {await memory.ForgetAsync(shutdown.Token);ui.Write("Conversation memory erased; mood and speaker profiles retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
                                 case "/look": if(!config.Permissions.ScreenCapture)ui.Write("Screen capture is disabled in config/appsettings.json.");else if(engine.Paused)ui.Write("Observation is paused; use /resume first.");else await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
@@ -116,7 +121,7 @@ public static class Program
             while(!ct.IsCancellationRequested)
             {
                 if(!desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey)) {await Task.Delay(25,ct);continue;}
-                engine.BeginListening();ui.Write("[Microphone] Listening while key is held…");
+                engine.ObserveBrowser();engine.BeginListening();ui.Write("[Microphone] Listening while key is held…");
                 try
                 {
                     var captured=await audio.ListenWhileHeldAsync(()=>desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey),ct);
@@ -129,9 +134,9 @@ public static class Program
         }
         catch(OperationCanceledException) { }
     }
-    private static async Task TimerAsync(ChannelWriter<AppEvent> writer,AppConfig config,CancellationToken ct)
+    private static async Task TimerAsync(ChannelWriter<AppEvent> writer,AppConfig config,CompanionEngine engine,CancellationToken ct)
     {
-        try {using var timer=new PeriodicTimer(TimeSpan.FromSeconds(config.Proactive.CheckSeconds));while(await timer.WaitForNextTickAsync(ct))writer.TryWrite(new("tick","","environment"));}catch(OperationCanceledException) { }
+        try {using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(500));var next=DateTimeOffset.Now;while(await timer.WaitForNextTickAsync(ct)){engine.ObserveBrowser();if(DateTimeOffset.Now>=next){writer.TryWrite(new("tick","","environment"));next=DateTimeOffset.Now.AddSeconds(config.Proactive.CheckSeconds);}}}catch(OperationCanceledException) { }
     }
     private static void Diagnose(PortablePaths paths,AppConfig config,AudioService audio,ConsoleUi ui)
     {
@@ -144,12 +149,16 @@ public static class Program
     Type a message in English or Russian. Evelyn answers in English.
     Hold F10 (configurable) to record; release to transcribe. Ctrl+C or /exit to quit.
     /look          Analyse current screen
+    /browser       Read and summarise the current/last active browser tab
+    /write PATH | TEXT  Prepare a new text file
+    /edit PATH | OLD | NEW  Prepare an exact replacement in a text file
     /pause /resume Pause/resume observation and unsolicited comments
     /mute          Toggle spoken replies
     /enroll NAME   Enroll the next held-key recording as a speaker (speak alone)
     /devices       List input/output audio devices
     /status        Mood, relationship and memory status
     /memory        Show compressed factual memory
+    /relationship  Show the separate persistent attitude toward the main user
     /compact       Compact memory now with the model
     /forget CONFIRM Erase conversation memory
     /approve N     Approve a displayed computer action (expires in 2 minutes)

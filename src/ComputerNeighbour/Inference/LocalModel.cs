@@ -15,11 +15,12 @@ public interface IChatModel
 public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, IAsyncDisposable
 {
     private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>("""
-    {"type":"object","additionalProperties":false,"required":["speak","reply","memory","emotion","actions"],"properties":{
+    {"type":"object","additionalProperties":false,"required":["speak","reply","memory","emotion","relationship","actions"],"properties":{
       "speak":{"type":"boolean"},"reply":{"type":"string","maxLength":4000},"memory":{"type":"string","maxLength":1000},
       "emotion":{"type":"object","additionalProperties":false,"required":["warmth","trust","closeness","valence","energy","stress","curiosity","reason"],"properties":{
         "warmth":{"type":"number","minimum":-0.03,"maximum":0.03},"trust":{"type":"number","minimum":-0.03,"maximum":0.03},"closeness":{"type":"number","minimum":-0.03,"maximum":0.03},
         "valence":{"type":"number","minimum":-0.03,"maximum":0.03},"energy":{"type":"number","minimum":-0.03,"maximum":0.03},"stress":{"type":"number","minimum":-0.03,"maximum":0.03},"curiosity":{"type":"number","minimum":-0.03,"maximum":0.03},"reason":{"type":"string","maxLength":160}}},
+      "relationship":{"type":"object","additionalProperties":false,"required":["currentAttitude","recentImpression","appreciates","concerns","boundaries"],"properties":{"currentAttitude":{"type":"string","maxLength":500},"recentImpression":{"type":"string","maxLength":300},"appreciates":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}},"concerns":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}},"boundaries":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}}}},
       "actions":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["tool","args"],"properties":{"tool":{"type":"string","maxLength":80},"args":{"type":"object"}}}}
     }}
     """);

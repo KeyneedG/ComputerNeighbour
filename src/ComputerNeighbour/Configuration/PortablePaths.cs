@@ -18,7 +18,7 @@ public sealed class PortablePaths
     }
     public void InitializeEnvironment()
     {
-        foreach (var dir in new[] { "data/tmp", "data/tmp/audio", "data/logs", "data/cache", "data/memory", "data/personality", "data/speakers", "documents", "characters" }) Directory.CreateDirectory(Inside(dir));
+        foreach (var dir in new[] { "data/tmp", "data/tmp/audio", "data/logs", "data/cache", "data/memory", "data/personality", "data/file-proposals", "data/file-backups", "data/speakers", "documents", "characters" }) Directory.CreateDirectory(Inside(dir));
         foreach (var name in new[] { "TEMP", "TMP", "TMPDIR" }) Environment.SetEnvironmentVariable(name, Inside("data/tmp"));
         foreach (var name in new[] { "HF_HOME", "XDG_CACHE_HOME", "LLAMA_CACHE" }) Environment.SetEnvironmentVariable(name, Inside("data/cache"));
     }
