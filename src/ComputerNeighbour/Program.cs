@@ -9,6 +9,7 @@ using ComputerNeighbour.Inference;
 using ComputerNeighbour.Memory;
 using ComputerNeighbour.Personality;
 using ComputerNeighbour.Platform;
+using ComputerNeighbour.Browser;
 
 namespace ComputerNeighbour;
 
@@ -40,6 +41,12 @@ public static class Program
                 ui.Write("Configuration ready: "+paths.Inside("config/appsettings.json")+"\nGrounded user profile: "+paths.Inside("data/memory/user-profile.json"));return 0;
             }
             if(args.Contains("--devices")) { ui.Write(audio.DescribeDevices());return 0; }
+            if(args.Contains("--browser-diagnose"))
+            {
+                if(!config.Permissions.ReadBrowser||!config.Browser.Enabled)throw new UnauthorizedAccessException("Browser reading is disabled.");
+                var page=await new WindowsBrowserReader(config.Browser,config.Desktop,config.Permissions.ReadWeb).ReadAsync(shutdown.Token);
+                ui.Write($"Browser: {page.Browser}\nTitle: {page.Title}\nURL: {page.Url??"unavailable"}\nRead method: {page.ReadMethod}\nReadable characters: {page.Text.Length}\nTruncated: {page.Truncated}");return 0;
+            }
             if(args.Contains("--diagnose")) { Diagnose(paths,config,audio,ui);return 0; }
             var memory=new MemoryStore(paths.Root,config.Memory);await memory.InitializeAsync(shutdown.Token);
             var emotions=new EmotionEngine(paths.Root);await emotions.InitializeAsync(shutdown.Token);
@@ -83,10 +90,14 @@ public static class Program
                                 case "/memory": ui.Write("Durable memory:\n"+memory.Summary);break;
                                 case "/relationship": ui.Write(await engine.GetRelationshipAsync(shutdown.Token));break;
                                 case "/browser": await engine.RespondAsync("Read the current browser page and summarize it.","user",false,false,shutdown.Token);break;
+                                case "/read": await engine.RespondAsync("Read "+arg,"user",false,false,shutdown.Token);break;
+                                case "/search": await engine.RespondAsync("Search for "+arg,"user",false,false,shutdown.Token);break;
+                                case "/news": await engine.RespondAsync(arg.Length==0?"Find the latest technology news.":"Find recent news about "+arg,"user",false,false,shutdown.Token);break;
+                                case "/sources": await engine.RespondAsync("Show the sources.","user",false,false,shutdown.Token);break;
                                 case "/write":case "/create": await engine.RespondAsync("write "+arg,"user",false,false,shutdown.Token);break;
                                 case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
-                                case "/forget": if(arg=="CONFIRM") {await memory.ForgetAsync(shutdown.Token);ui.Write("Conversation memory erased; mood and speaker profiles retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
+                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory and saved web sources erased; profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
                                 case "/look": if(!config.Permissions.ScreenCapture)ui.Write("Screen capture is disabled in config/appsettings.json.");else if(engine.Paused)ui.Write("Observation is paused; use /resume first.");else await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -162,6 +173,10 @@ public static class Program
     Hold F10 (configurable) to record; release to transcribe. Ctrl+C or /exit to quit.
     /look          Analyse current screen
     /browser       Read and summarise the current/last active browser tab
+    /read URL      Fetch and read a public article
+    /search QUERY  Search the live internet, read results and show source URLs
+    /news [TOPIC]  Find recent news (technology by default)
+    /sources       Show verified links from the last lookup
     /write PATH | TEXT  Prepare a new text file
     /edit PATH | OLD | NEW  Prepare an exact replacement in a text file
     /pause /resume Pause/resume observation and unsolicited comments

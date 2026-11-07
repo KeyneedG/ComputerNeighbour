@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using ComputerNeighbour.Platform;
+using ComputerNeighbour.Internet;
+using ComputerNeighbour.Tools;
 
 namespace ComputerNeighbour.Browser;
 
@@ -15,12 +17,13 @@ public sealed class WindowsBrowserReader : IBrowserReader
 {
     private readonly BrowserOptions options;
     private readonly PlatformOptions privacy;
+    private readonly bool allowPublicFetch;
     private readonly HashSet<string> allowedProcesses;
     private readonly object workerGate = new();
     private Task<BrowserPage>? inFlight;
     private WindowIdentity? lastBrowser;
 
-    public WindowsBrowserReader(BrowserOptions options, PlatformOptions privacy)
+    public WindowsBrowserReader(BrowserOptions options, PlatformOptions privacy,bool allowPublicFetch=false)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(privacy);
@@ -30,6 +33,7 @@ public sealed class WindowsBrowserReader : IBrowserReader
             throw new ArgumentException("Browser allowedProcesses must contain process basenames, optionally ending in .exe; paths and command lines are not supported.");
         this.options = options;
         this.privacy = privacy;
+        this.allowPublicFetch=allowPublicFetch;
         allowedProcesses = new(options.AllowedProcesses.Select(p => Path.GetFileNameWithoutExtension(p)), StringComparer.OrdinalIgnoreCase);
     }
 
@@ -107,7 +111,21 @@ public sealed class WindowsBrowserReader : IBrowserReader
             }
         }
         if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException("The selected browser did not expose readable document text. Make its intended tab visible and enable browser accessibility if necessary, or provide the page URL. Window titles alone are not treated as page contents.");
+        {
+            var publicUrl=initialUrl??documentUrl;
+            if(allowPublicFetch&&options.PublicUrlFallback&&publicUrl is not null&&WebParsing.IsWebUrl(publicUrl))
+            {
+                var fetched=PublicWeb.ReadDocumentAsync(publicUrl,token).GetAwaiter().GetResult();
+                var page=WebParsing.Article(fetched,options.MaxCharacters);
+                if(string.IsNullOrWhiteSpace(page.Text))throw new IOException("Neither browser accessibility nor the public page returned readable text.");
+                if(System.Text.RegularExpressions.Regex.IsMatch(page.Title,@"^(?:just a moment|access denied|robot check|attention required)",System.Text.RegularExpressions.RegexOptions.IgnoreCase))throw new IOException("The public fallback returned an access check; it was not treated as an article.");
+                var addressAfterFetch=automation.ReadAddress(root,token);
+                if(initialUrl is not null&&addressAfterFetch is not null&&!string.Equals(initialUrl,addressAfterFetch,StringComparison.Ordinal))throw new InvalidOperationException("The browser navigated during public-page fallback. Retry on the intended tab.");
+                EnsureWindowUnchanged(window);
+                return new(window.ProcessName,window.Title,page.Url,page.Text,page.Truncated,"public-url-fallback");
+            }
+            throw new InvalidOperationException("The selected browser did not expose document text or an accessible public address. Keep its intended tab visible and retry; /read URL can fetch a public article directly. Window titles alone are not page contents.");
+        }
         token.ThrowIfCancellationRequested();
         var finalUrl = automation.ReadAddress(root, token);
         EnsureWindowUnchanged(window);

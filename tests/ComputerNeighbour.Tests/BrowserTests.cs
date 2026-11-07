@@ -27,8 +27,8 @@ internal static class BrowserTests
             Check.Equal(1, model.Calls.Count);
             Check.True(!model.Calls[0].Json, "Browser summaries should use the grounded English text path.");
             Check.True(model.Calls[0].Messages.Any(m => m.Text.Contains("BROWSER_TEXT_SENTINEL") && m.Text.Contains("https://example.org/solar")), "The model did not receive actual page text and source URL.");
-            Check.True(fixture.Output.Lines.Any(l => l.EndsWith("The page explains that solar panels charge batteries during daylight.")), "The browser summary was not printed.");
-            Check.True(fixture.Memory.Recent.Any(e => e.Role == "assistant" && e.Text == "The page explains that solar panels charge batteries during daylight."), "The actual answer was not saved.");
+            Check.True(fixture.Output.Lines.Any(l => l.Contains("The page explains that solar panels charge batteries during daylight.")&&l.Contains("https://example.org/solar")), "The grounded browser summary and verified URL were not printed.");
+            Check.True(fixture.Memory.Recent.Any(e => e.Role == "assistant" && e.Text.Contains("The page explains that solar panels charge batteries during daylight.")&&e.Text.Contains("https://example.org/solar")), "The answer with its actual source was not saved.");
         });
         await suite.Case("browser permission and browser enabled setting both block the reader before invocation", async root =>
         {

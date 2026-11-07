@@ -3,6 +3,7 @@ using ComputerNeighbour.Audio;
 using ComputerNeighbour.Memory;
 using ComputerNeighbour.Platform;
 using ComputerNeighbour.Browser;
+using ComputerNeighbour.Internet;
 
 namespace ComputerNeighbour.Configuration;
 
@@ -20,6 +21,7 @@ public sealed class AppConfig
     public PermissionOptions Permissions { get; set; } = new();
     public WeatherOptions Weather { get; set; } = new();
     public BrowserOptions Browser { get; set; } = new();
+    public InternetOptions Internet { get; set; } = new();
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true, ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
 
     public static AppConfig Load(PortablePaths paths)
@@ -34,7 +36,7 @@ public sealed class AppConfig
 
     public void Validate(PortablePaths paths)
     {
-        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Permissions is null || Weather is null || Browser is null)
+        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Permissions is null || Weather is null || Browser is null || Internet is null)
             throw new InvalidDataException("Configuration sections cannot be null.");
         if (string.IsNullOrWhiteSpace(CharacterName) || CharacterName.Length>80 || string.IsNullOrWhiteSpace(UserName) || UserName.Length>80)
             throw new InvalidDataException("Character/user names must contain 1–80 characters.");
@@ -58,6 +60,8 @@ public sealed class AppConfig
         foreach (var directory in Permissions.WritableDirectories) paths.Inside(directory);
         if(Permissions.MaxWritableFileBytes is <1024 or >10_000_000 || Browser.MaxCharacters is <1000 or >100_000 || Browser.ReadTimeoutSeconds is <1 or >60)
             throw new InvalidDataException("Invalid file size or browser read limits.");
+        if(Internet.SearchProvider is not ("auto" or "duckduckgo" or "bing-rss")||Internet.MaxResults is <1 or >10||Internet.MaxArticles is <1 or >3||Internet.MaxArticleCharacters is <1000 or >50000||Internet.RequestTimeoutSeconds is <3 or >60||Internet.NewsMaxAgeDays is <1 or >365||Internet.TechnologyNewsFeeds is null||Internet.TechnologyNewsFeeds.Any(url=>!WebParsing.IsWebUrl(url)))
+            throw new InvalidDataException("Invalid internet/search configuration.");
         foreach (var path in new[] { CharacterFile, Model.Executable, Model.ModelFile, Model.ProjectorFile, Audio.WhisperExecutable, Audio.WhisperModel, Audio.PiperExecutable, Audio.PiperModel })
             paths.Inside(path);
     }
@@ -106,6 +110,7 @@ public sealed class PermissionOptions
     public bool ForegroundWindow { get; set; } = true;
     public bool SystemStatus { get; set; } = true;
     public bool ReadWeb { get; set; } = true;
+    public bool SearchWeb { get; set; } = true;
     public bool ReadFiles { get; set; } = true;
     public bool WriteFiles { get; set; } = true;
     public bool ReadBrowser { get; set; } = true;

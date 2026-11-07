@@ -114,7 +114,7 @@ internal sealed class NativeUia : IDisposable
         finally { if (ownsCurrent) current.Dispose(); }
     }
 
-    internal static string? WebAddress(string? value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" or "file" ? value : null;
+    internal static string? WebAddress(string? value) => BrowserAddress.Normalize(value);
 
     internal string ReadDocumentText(ComPointer document, int limit, CancellationToken token)
     {
