@@ -68,8 +68,8 @@ public sealed class ModelOptions
     public string Endpoint { get; set; } = "http://127.0.0.1:18389";
     public bool AutoStart { get; set; } = true;
     public string Executable { get; set; } = "runtimes/llama/llama-server.exe";
-    public string ModelFile { get; set; } = "models/llm/model.gguf";
-    public string ProjectorFile { get; set; } = "models/llm/mmproj.gguf";
+    public string ModelFile { get; set; } = "models/llm/qwen35-4b/Qwen3.5-4B-Q4_K_M.gguf";
+    public string ProjectorFile { get; set; } = "models/llm/qwen35-4b/mmproj-F16.gguf";
     public int ContextSize { get; set; } = 16384;
     public int GpuLayers { get; set; } = 99;
     public int Threads { get; set; } = 6;
@@ -87,13 +87,14 @@ public sealed class ObservationOptions
 public sealed class ProactiveOptions
 {
     public bool Enabled { get; set; } = true;
+    public bool RequireFirstUserMessage { get; set; } = true;
     public int CheckSeconds { get; set; } = 5;
-    public int MinIntervalSeconds { get; set; } = 180;
-    public int MaxIntervalSeconds { get; set; } = 420;
-    public int CooldownSeconds { get; set; } = 90;
+    public int MinIntervalSeconds { get; set; } = 600;
+    public int MaxIntervalSeconds { get; set; } = 1800;
+    public int CooldownSeconds { get; set; } = 300;
     public int QuietStartHour { get; set; } = 0;
     public int QuietEndHour { get; set; } = 8;
-    public bool TriggerOnWindowChange { get; set; } = true;
+    public bool TriggerOnWindowChange { get; set; } = false;
     public bool TriggerOnReturnFromIdle { get; set; } = true;
     public int AwayAfterSeconds { get; set; } = 300;
     public int MaxUnansweredMessages { get; set; } = 2;

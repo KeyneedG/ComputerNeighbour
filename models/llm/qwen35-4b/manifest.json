@@ -1,0 +1,28 @@
+{
+  "repository": "unsloth/Qwen3.5-4B-GGUF",
+  "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+  "license": "Apache-2.0",
+  "source": "https://huggingface.co/Qwen/Qwen3.5-4B",
+  "artifacts": [
+    {
+      "rfilename": "Qwen3.5-4B-Q4_K_M.gguf",
+      "blobId": "4ca59aa028e499c9351f394e844f5e27056e5846",
+      "size": 2740937888,
+      "lfs": {
+        "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        "size": 2740937888,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "mmproj-F16.gguf",
+      "blobId": "df5eff16338bf924865eb98723fc7ef20eb54e7f",
+      "size": 672423616,
+      "lfs": {
+        "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+        "size": 672423616,
+        "pointerSize": 134
+      }
+    }
+  ]
+}

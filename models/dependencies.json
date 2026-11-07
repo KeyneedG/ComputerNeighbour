@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "notes": "Pinned portable Windows x64 artifacts. Qwen vision projector belongs to exactly the same repository revision as the language model. Empty hash means local SHA-256 is recorded after download, not upstream authenticated.",
+  "notes": "Pinned portable Windows x64 artifacts. Default Qwen3.5-4B Q4_K_M and F16 projector are from the same immutable Unsloth revision of the Apache-2.0 Qwen model. Legacy Qwen2.5 model files are preserved locally as an optional manual fallback.",
   "artifacts": [
     {
       "id": "llama-vulkan-b12110",
@@ -49,22 +49,22 @@
       "executable": "piper.exe"
     },
     {
-      "id": "qwen25vl3b-q4km",
+      "id": "qwen35-4b-q4km",
       "component": "llama",
       "kind": "model",
-      "bytes": 1929901056,
-      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
-      "path": "models/llm/model.gguf",
-      "sha256": "d02fe9b69ad8cadbbd228e387667af66612c44bed29ffc8eb1e7caf9ac486c12"
+      "bytes": 2740937888,
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+      "path": "models/llm/qwen35-4b/Qwen3.5-4B-Q4_K_M.gguf",
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
     },
     {
-      "id": "qwen25vl3b-mmproj-q8",
+      "id": "qwen35-4b-mmproj-f16",
       "component": "llama",
       "kind": "model",
-      "bytes": 844757728,
-      "url": "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/5037fcf163dd95d1e41d1974465f0898ed108ca2/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf",
-      "path": "models/llm/mmproj.gguf",
-      "sha256": "980c9b2f78c04e6cff93d277ada09e768394f112d75db3b4e9dea8a69f9fb904"
+      "bytes": 672423616,
+      "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-F16.gguf",
+      "path": "models/llm/qwen35-4b/mmproj-F16.gguf",
+      "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"
     },
     {
       "id": "whisper-base-multilingual",

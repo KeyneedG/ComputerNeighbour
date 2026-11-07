@@ -5,7 +5,8 @@
 | Компонент | Источник | Лицензия / примечание |
 | --- | --- | --- |
 | llama.cpp b12110 | https://github.com/ggml-org/llama.cpp/releases/tag/b12110 | MIT. Стабильная версия v0.9.0 ссылается на эту бинарную сборку. |
-| Qwen2.5-VL-3B-Instruct Q4_K_M и Q8 projector | https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF | Веса исходной модели: Qwen Research License; см. https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE. Файлы взяты из одной зафиксированной ревизии. |
+| Qwen3.5-4B Q4_K_M и F16 projector (по умолчанию) | https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/tree/e87f176479d0855a907a41277aca2f8ee7a09523 | Apache-2.0 исходной Qwen/Qwen3.5-4B: https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/LICENSE. Модель и projector из одной зафиксированной ревизии; SHA-256 проверены по LFS. Карточка, лицензия и происхождение сохранены рядом с моделью. |
+| Qwen2.5-VL-3B-Instruct Q4_K_M и Q8 projector (старый ручной fallback) | https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF | Старые файлы сохранены без изменения и больше не являются стандартной загрузкой. Они остаются под Qwen Research License: https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE. |
 | whisper.cpp v1.9.2 | https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.2 | MIT. Многоязычная base, не base.en; понимает русский и английский. |
 | Whisper base | https://huggingface.co/ggerganov/whisper.cpp | Модель OpenAI Whisper, MIT: https://github.com/openai/whisper/blob/main/LICENSE. |
 | Piper 2023.11.14-2 | https://github.com/rhasspy/piper/releases/tag/2023.11.14-2 | Архивная переносимая Windows-сборка исходного Piper, MIT. Встроенные зависимости, включая espeak-ng, имеют собственные лицензии; сохраняйте содержимое архива при распространении. Новый Piper https://github.com/OHF-Voice/piper1-gpl имеет GPLv3 и другой цикл поставки. |
@@ -13,7 +14,7 @@
 | .NET 10 | https://dotnet.microsoft.com/ | MIT и лицензии компонентов, см. LICENSE.txt / ThirdPartyNotices.txt в опубликованном runtime. |
 | Microsoft VC++ v14 x64 CRT 14.51.36247 | https://aka.ms/vc14/vc_redist.x64.exe | Microsoft Software License Terms: https://aka.ms/VCRedistLicense. Официальный подписанный пакет сохранён; SHA-256 и прямая ссылка зафиксированы в manifest. Из CAB извлекаются локальные DLL, EXE/MSI не запускаются. Копия страницы лицензии: `models/licenses/Microsoft-VCRedist-LICENSE.html`. |
 
-Для запуска модели с изображениями нужен projector `models/llm/mmproj.gguf`. Сам файл языковой модели не заменяет vision encoder. Общая загрузка выбранной конфигурации — около 3,05 ГБ; после распаковки и публикации потребуется дополнительное место. Базовый backend Vulkan работает через уже установленный видеодрайвер, отдельный CUDA Toolkit не нужен. На машине без подходящего GPU запустите `Setup.cmd -Backend cpu`, а в конфигурации приложения задайте `GpuLayers: 0`.
+Для запуска модели с изображениями нужен соответствующий projector `models/llm/qwen35-4b/mmproj-F16.gguf`. Сам файл языковой модели не заменяет vision encoder. Общая загрузка стандартной конфигурации — около 3,7 ГБ; после распаковки и публикации потребуется дополнительное место. Сохранённый старый fallback занимает дополнительно около 2,8 ГБ. Базовый backend Vulkan работает через уже установленный видеодрайвер, отдельный CUDA Toolkit не нужен. На машине без подходящего GPU запустите `Setup.cmd -Backend cpu`, а в конфигурации приложения задайте `GpuLayers: 0`.
 
 ## Повторная сборка и перенос
 

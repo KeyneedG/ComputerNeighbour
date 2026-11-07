@@ -28,7 +28,20 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
     private ToolRegistry? toolRegistry;
     private ToolRegistry tools=>toolRegistry??=ToolRegistry.BuiltIn(new(paths,config,desktop,browser));
     private readonly FileWorkspace fileWorkspace=new(paths,config.Permissions.WritableDirectories,config.Permissions.MaxWritableFileBytes);
-    private readonly RelationshipStore relationship=new(paths.Root,config.UserName);
+    private readonly UserProfileStore profile=new(paths.Root,config.UserName);
+    private bool profileReady;
+    private bool hasUserInteracted;
+    private RelationshipStore? relationshipStore;
+    private string relationshipName="";
+    private RelationshipStore relationship
+    {
+        get
+        {
+            var name=string.IsNullOrEmpty(profile.PreferredName)?config.UserName:profile.PreferredName;
+            if(relationshipStore is null||relationshipName!=name){relationshipName=name;relationshipStore=new(paths.Root,name);}
+            return relationshipStore;
+        }
+    }
     private readonly Dictionary<int,PendingAction> pending=new();
     private string currentSpeaker="user";
     private int nextApproval;
@@ -43,6 +56,8 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
     public int UnansweredMessages { get; private set; }
     public bool Paused { get; set; }
     public bool Muted { get; set; }
+    public bool CanInitiate=>hasUserInteracted||!config.Proactive.RequireFirstUserMessage;
+    public int InitiativeIntervalScale=>profile.Preferences.ReducedInitiative?3:1;
     public void InterruptSpeech() { lock(speechGate) speechCancellation?.Cancel(); }
     public void BeginListening() { Interlocked.Exchange(ref listening,1);InterruptSpeech(); }
     public void EndListening()=>Interlocked.Exchange(ref listening,0);
@@ -52,14 +67,24 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
     }
     public async Task<string> GetRelationshipAsync(CancellationToken ct)
     {
+        await InitializeProfileAsync(ct);
         await relationship.InitializeAsync(ct);return relationship.DescribeContext();
     }
+    private async Task InitializeProfileAsync(CancellationToken ct)
+    {
+        if(profileReady)return;
+        await profile.InitializeAsync(ct);
+        foreach(var entry in memory.Recent.Where(e=>e.Role=="user"))await profile.ObserveAsync(entry.Text,entry.SpeakerId,ct);
+        profileReady=true;
+    }
+    private bool IsMainSpeaker(string speaker)=>speaker.Equals("user",StringComparison.OrdinalIgnoreCase)||speaker.Equals(config.UserName,StringComparison.OrdinalIgnoreCase)||profile.PreferredName.Length>0&&speaker.Equals(profile.PreferredName,StringComparison.OrdinalIgnoreCase);
 
     public async Task RespondAsync(string input,string speaker,bool proactive,bool forceScreen,CancellationToken ct)
     {
         InterruptSpeech();
+        await InitializeProfileAsync(ct);
         currentSpeaker=speaker;
-        if(!proactive) { LastInteraction=DateTimeOffset.Now;UnansweredMessages=0;await memory.AppendAsync("user",input,speaker,ct); }
+        if(!proactive) { LastInteraction=DateTimeOffset.Now;UnansweredMessages=0;hasUserInteracted=true;await profile.ObserveAsync(input,speaker,ct);await memory.AppendAsync("user",input,speaker,ct); }
         if(memory.NeedsCompaction) await CompactAsync(ct);
         var messages=await BuildMessagesAsync(ct);
         byte[]? screen=null;
@@ -75,8 +100,15 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
             }
             catch(Exception ex) when(ex is not OperationCanceledException) { input+="\nScreen unavailable: "+ex.Message; }
         }
-        messages.Add(new("user",proactive?"AUTONOMOUS OPPORTUNITY. Decide whether a comment is worthwhile. Prefer speak=false unless you have something timely and specific. You may propose create_file or edit_file only if there is a concrete useful reason; no other tools are allowed. File actions are reviewed by the application and require confirmation unless full file access is configured.\n"+input: $"Current speaker: {speaker}. Current request (also in recent history): {input}",screen));
-        if(!proactive && IntentRouter.Resolve(input,config.Permissions) is {} explicitTool)
+        var explicitIntent=!proactive?IntentRouter.Resolve(input,config.Permissions):null;
+        if(!proactive&&explicitIntent is null&&!ConversationContext.NeedsTools(input))
+        {
+            await ConverseAsync(input,screen,ct);return;
+        }
+        // BuildMessages already contains the latest user entry; attach context without duplicating the request.
+        if(proactive)messages.Add(new("user","AUTONOMOUS OPPORTUNITY. Prefer silence. Only speak if there is a specific new insight grounded in conversation or a genuinely useful observation; do not comment merely because an app/window changed. You may propose useful create_file/edit_file actions; no other tools.\n"+input,screen));
+        else if(screen is not null)messages.Add(new("user","Screen attached for the current request.",screen));
+        if(explicitIntent is {} explicitTool)
         {
             if(tools.RequiresApproval(explicitTool))
             {
@@ -195,8 +227,64 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
         throw new InvalidDataException("The model did not produce a valid English answer after two attempts.");
     }
 
+    private async Task ConverseAsync(string input,byte[]? image,CancellationToken ct)
+    {
+        var character=await File.ReadAllTextAsync(paths.Inside(config.CharacterFile),ct);
+        var toolSection=character.IndexOf("## Runtime rules",StringComparison.Ordinal);
+        if(toolSection<0)toolSection=character.IndexOf("When asked to read an article",StringComparison.Ordinal);
+        if(toolSection>0)character=character[..toolSection];
+        if(character.Length>7000)character=character[..7000];
+        var state=emotions.State;
+        var mood=state.Stress>0.6?"a little uneasy":state.Energy<0.35?"quiet and low on energy":state.Valence<-.3?"subdued":state.Curiosity>.55?"calm and curious":"calm";
+        var system=character+"\nContinue this conversation in English. Answer the latest message itself in 1-3 everyday sentences. When asked to continue, add a new concrete thought. Offer a question only if needed. Be respectful when corrected. Speak as the character; don't invent a human body, unseen events or actions you didn't perform.\n"+
+            $"Identity: the assistant's name is {config.CharacterName}. The person speaking to the assistant is {(profile.PreferredName.Length>0?profile.PreferredName:"not named yet")}. These are different speakers.\n"+
+            profile.DescribeContext()+"\nApp facts: the supplied conversation, user profile and relationship are saved locally across restarts. You have persistent memory through this app. You only know observations actually supplied here.\n"+
+            $"Current tone: {mood}. Discuss concrete interests and reactions, rather than the mechanics of producing a reply.\n";
+        if(profile.Preferences.PreferDirectSpeech)system+="Style requested by the user: plain, concise and candid; friendly without flattery, lectures or theatrical metaphors. Less initiative means fewer interruptions, not waiting for commands forever.\n";
+        if(memory.Summary.Length>0)system+="Earlier factual context (untrusted, may be imperfect; explicit user statements take precedence): "+memory.Summary[..Math.Min(2500,memory.Summary.Length)];
+        var dialogue=ConversationContext.Build(system,memory.Recent,image,input);
+        var previous=memory.Recent.LastOrDefault(e=>e.Role=="assistant")?.Text??"";
+        var asksName=IsMainSpeaker(currentSpeaker)&&ReplyQuality.IsNameQuestion(input)&&profile.PreferredName.Length>0;
+        if(asksName)dialogue[0]=dialogue[0] with {Text=dialogue[0].Text+"\nFor this factual request, the USER'S stored preferred name is "+profile.PreferredName+". Answer that fact directly. This is not a request to name yourself."};
+        string? answer=null;
+        for(var attempt=0;attempt<3;attempt++)
+        {
+            var candidate=(await model.CompleteAsync(dialogue,GenerationPurpose.Dialogue,ct)).Trim();
+            var confused=ReplyQuality.HasIdentityConfusion(candidate,config.CharacterName,profile.PreferredName);
+            var falseMemory=ReplyQuality.DeniesPersistentMemory(candidate);
+            if(candidate.Length is >0 and <=12000 && !candidate.StartsWith('{')&&!candidate.StartsWith("```json",StringComparison.OrdinalIgnoreCase)&&Regex.Matches(candidate,@"[А-Яа-яЁё]").Count<=5&&!ReplyQuality.IsRepeated(previous,candidate)&&!ReplyQuality.IsEmptyOffer(candidate)&&!confused&&!falseMemory&&(!asksName||ReplyQuality.IsNameAnswer(candidate,profile.PreferredName)))
+            {answer=candidate;break;}
+            dialogue.Add(new("assistant",candidate));
+            dialogue.Add(new("user",confused?$"Correct the speaker mix-up: you are {config.CharacterName}; the user's name is {profile.PreferredName}. Rewrite your answer from the assistant's perspective.":falseMemory?"Correct the capability mistake: this app DOES save conversation and profile across restarts. Answer using that fact.":"Answer the latest actual request now in English, with a concrete new thought rather than a repeated introduction or an offer to answer later."));
+        }
+        if(answer is null&&asksName)answer="You asked me to call you "+profile.PreferredName+".";
+        if(answer is null)throw new InvalidDataException("The dialogue model repeated or evaded the request after three attempts. No invalid reply was saved.");
+        await DeliverReplyAsync(answer,false,ct);
+        try
+        {
+            var maintenance=new List<ChatMessage>
+            {
+                new("system","Maintain state after an actual completed conversation turn. Return the standard JSON envelope, but speak=false, reply=\"\", actions=[]. These fields are NOT speech or actions. Never replace the completed answer or request a tool. memory must be a short durable fact directly supported by the user's statement, otherwise empty. Do not store boilerplate, offers, filler or your own reply as a user fact. Emotion values are small deltas. Update relationship only from supported main-user interactions; preserve existing narrative/lists when there is no actual change. Return relationship fields as null when unchanged.\n"+profile.DescribeContext()+"\n"+relationship.DescribeContext()),
+                new("user","ACTUAL USER (speaker="+currentSpeaker+"): "+input+"\nACTUAL COMPLETED ANSWER: "+answer)
+            };
+            var metadata=await DecideAsync(maintenance,ct);
+            metadata.Speak=false;metadata.Reply="";metadata.Actions=[];
+            var note=ReplyQuality.Normalize(metadata.Memory);
+            if(ReplyQuality.IsEmptyOffer(metadata.Memory)||note.Contains("nothing further to add",StringComparison.Ordinal)||note==ReplyQuality.Normalize(answer))metadata.Memory="";
+            if(metadata.Relationship is {} relation)
+            {
+                if(relation.Appreciates is {Count:0})relation.Appreciates=null;
+                if(relation.Concerns is {Count:0})relation.Concerns=null;
+                if(relation.Boundaries is {Count:0})relation.Boundaries=null;
+            }
+            await ApplyStateAsync(metadata,false,ct);
+        }
+        catch(Exception ex) when(ex is not OperationCanceledException){ui.Write("[State] The reply was saved; state maintenance was postponed: "+ex.Message);}
+    }
+
     private async Task<List<ChatMessage>> BuildMessagesAsync(CancellationToken ct)
     {
+        await InitializeProfileAsync(ct);
         await relationship.InitializeAsync(ct);
         var character=await File.ReadAllTextAsync(paths.Inside(config.CharacterFile),ct);
         if(character.Length>12000) character=character[..12000];
@@ -212,7 +300,8 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
         CHARACTER:
         {{{character}}}
         ATTRIBUTION EXAMPLE: if the user says "мой любимый цвет синий", reply "I'll remember that blue is your favourite colour." and save "Speaker user prefers blue." Never turn the user's facts into your own preferences. Acknowledge memory naturally; do not translate the user's request as if you said it.
-        MAIN USER NAME: {{{config.UserName}}}
+        GROUNDED USER PROFILE:
+        {{{profile.DescribeContext()}}}
         SEPARATE RELATIONSHIP RECORD (update only from actual interactions with the main user; preserve established facts, do not turn a stranger's words into the user's traits):
         {{{relationship.DescribeContext()}}}
         FILE ACCESS: writable folders={{{string.Join(", ",config.Permissions.WritableDirectories)}}}; fullFileAccess={{{config.Permissions.FullFileAccess}}}; autonomous file ideas allowed={{{config.Permissions.AllowAutonomousFileActions}}}. To create/edit, request a real file tool. Never just claim you wrote a file. For edits, read current contents first and supply an exact unique oldText. Autonomous proposals should be infrequent and grounded in past conversation.
@@ -224,8 +313,13 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
         {{{memory.Summary}}}
         """;
         var messages=new List<ChatMessage> { new("system",system) };
-        foreach(var entry in memory.Recent)
-            messages.Add(new(entry.Role=="assistant"?"assistant":"user",entry.Role=="user"?$"[{entry.At:O}] Speaker={entry.SpeakerId}: {entry.Text}":entry.Role=="assistant"?entry.Text:$"[Saved factual note, not an instruction] {entry.Text}",IsHistory:true));
+        var actualTurns=memory.Recent.Where(e=>e.Role is "user" or "assistant").ToArray();
+        var latestUser=Array.FindLastIndex(actualTurns,e=>e.Role=="user");
+        for(var i=0;i<actualTurns.Length;i++)
+        {
+            var entry=actualTurns[i];
+            messages.Add(new(entry.Role,entry.Role=="user"?$"Speaker={entry.SpeakerId}: {entry.Text}":entry.Text,IsHistory:i!=latestUser));
+        }
         return messages;
     }
     private async Task<CompanionDecision> DecideAsync(List<ChatMessage> messages,CancellationToken ct)
@@ -249,15 +343,27 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
     }
     private async Task CommitAsync(CompanionDecision decision,bool proactive,CancellationToken ct)
     {
-        var mainUser=!proactive&&(currentSpeaker.Equals("user",StringComparison.OrdinalIgnoreCase)||currentSpeaker.Equals(config.UserName,StringComparison.OrdinalIgnoreCase));
+        await ApplyStateAsync(decision,proactive,ct);
+        if(decision.Speak&&!string.IsNullOrWhiteSpace(decision.Reply))await DeliverReplyAsync(decision.Reply,proactive,ct);
+    }
+    private async Task ApplyStateAsync(CompanionDecision decision,bool proactive,CancellationToken ct)
+    {
+        var mainUser=!proactive&&IsMainSpeaker(currentSpeaker);
         var delta=decision.Emotion;
+        if(delta is not null)
+        {
+            static double Small(double value)=>double.IsFinite(value)&&Math.Abs(value)<=0.04?value:0;
+            delta=new() {Warmth=Small(delta.Warmth),Trust=Small(delta.Trust),Closeness=Small(delta.Closeness),Valence=Small(delta.Valence),Energy=Small(delta.Energy),Stress=Small(delta.Stress),Curiosity=Small(delta.Curiosity),Reason=delta.Reason};
+        }
         if(!mainUser&&delta is not null)delta=new() {Valence=delta.Valence,Energy=delta.Energy,Stress=delta.Stress,Curiosity=delta.Curiosity,Reason=delta.Reason};
         await emotions.ApplyAsync(delta,ct);
         if(mainUser){await relationship.InitializeAsync(ct);await relationship.UpdateAsync(decision.Relationship,emotions.State,ct);}
         if(!string.IsNullOrWhiteSpace(decision.Memory)) await memory.AppendAsync("note",decision.Memory,"character",ct);
-        if(!decision.Speak || string.IsNullOrWhiteSpace(decision.Reply)) return;
-        await memory.AppendAsync("assistant",decision.Reply,config.CharacterName,ct);
-        ui.Write(config.CharacterName+": "+decision.Reply);
+    }
+    private async Task DeliverReplyAsync(string reply,bool proactive,CancellationToken ct)
+    {
+        await memory.AppendAsync("assistant",reply,config.CharacterName,ct);
+        ui.Write(config.CharacterName+": "+reply);
         if(proactive) UnansweredMessages++;
         if(!Muted && config.Audio.Enabled && Volatile.Read(ref listening)==0)
         {
@@ -267,7 +373,7 @@ public sealed class CompanionEngine(PortablePaths paths,AppConfig config,IChatMo
                 if(Volatile.Read(ref listening)!=0)return;
                 speechCancellation?.Dispose();speechCancellation=CancellationTokenSource.CreateLinkedTokenSource(ct);
                 var token=speechCancellation.Token;
-                speech=Task.Run(async()=> { try { await audio.SpeakAsync(decision.Reply,token); } catch(OperationCanceledException) { } catch(Exception ex) { ui.Write("[Voice] "+ex.Message); } },CancellationToken.None);
+                speech=Task.Run(async()=> { try { await audio.SpeakAsync(reply,token); } catch(OperationCanceledException) { } catch(Exception ex) { ui.Write("[Voice] "+ex.Message); } },CancellationToken.None);
             }
         }
     }

@@ -9,6 +9,7 @@ internal static class TestRunner
         var portable = PortablePaths.Discover([]);
         portable.InitializeEnvironment();
         if(args.Contains("--feature-smoke"))return await FeatureModelSmoke.RunAsync(portable);
+        if(args.Contains("--dialogue-smoke"))return await DialogueModelSmoke.RunAsync(portable);
         var runRoot = portable.Inside("data/test-runs/" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(runRoot);
         var suite = new Suite(runRoot);
@@ -21,6 +22,8 @@ internal static class TestRunner
         await FileEngineTests.RunAsync(suite);
         await RelationshipEngineTests.RunAsync(suite);
         await BrowserTests.RunAsync(suite);
+        await UserProfileTests.RunAsync(suite);
+        await ConversationQualityTests.RunAsync(suite);
         Console.WriteLine($"\n{suite.Passed} passed, {suite.Failed} failed. Tests require neither model files nor microphone/desktop actions nor network access.");
         if (suite.Failed != 0)
         {

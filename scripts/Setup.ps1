@@ -10,7 +10,12 @@ $manifestPath = Get-PortablePath 'models/dependencies.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $lockPath = Get-PortablePath 'models/installed-lock.json'
 $installed = @()
-if (Test-Path -LiteralPath $lockPath) { $installed = @(Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json) }
+if (Test-Path -LiteralPath $lockPath) {
+    # Windows PowerShell 5 can wrap an array returned directly inside @(...).
+    # Enumerate the deserialized array explicitly so subsequent JSON stays flat.
+    $loadedRecords = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+    foreach ($loadedRecord in $loadedRecords) { $installed += $loadedRecord }
+}
 $total = 0L
 foreach ($item in $manifest.artifacts) {
     if ($item.backend -and $item.backend -ne $Backend) { continue }
@@ -34,7 +39,7 @@ foreach ($item in $manifest.artifacts) {
     }
     $record = [ordered]@{ id=$item.id; path=$item.path; url=$item.url; sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant(); bytes=(Get-Item -LiteralPath $file).Length; verifiedAt=[DateTimeOffset]::Now.ToString('o') }
     $installed = @($installed | Where-Object { $_.id -ne $item.id }) + $record
-    $installed | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($lockPath + '.tmp') -Encoding UTF8
+    ConvertTo-Json -InputObject @($installed) -Depth 10 | Set-Content -LiteralPath ($lockPath + '.tmp') -Encoding UTF8
     Move-Item -LiteralPath ($lockPath + '.tmp') -Destination $lockPath -Force
 }
 Write-Host ('Dependencies are ready. Backend: ' + $Backend)

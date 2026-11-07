@@ -28,7 +28,7 @@ internal static class RelationshipEngineTests
     {
         await suite.Case("main-user dialogue persists separate relationship narrative and emotional scores and survives forgetting dialogue", async root =>
         {
-            var model = new ScriptedModel(Decision("Comfortable with Alex's thoughtful style.", "Alex took time to listen.", new() { Warmth = 0.03, Trust = 0.02, Closeness = 0.02 }));
+            var model = new ScriptedModel("I appreciate how carefully you listened.",Decision("Comfortable with Alex's thoughtful style.", "Alex took time to listen.", new() { Warmth = 0.03, Trust = 0.02, Closeness = 0.02 }));
             await using var fixture = await Fixture.CreateAsync(root, model);
             await fixture.Engine.RespondAsync("Thank you for taking the time to explain that.", "user", false, false, CancellationToken.None);
             var relationship = await OpenRelationshipAsync(root);
@@ -40,7 +40,8 @@ internal static class RelationshipEngineTests
             Check.Equal(fixture.Emotions.State.Trust, relationship.State.Trust);
             Check.Equal(fixture.Emotions.State.Closeness, relationship.State.Closeness);
             Check.True(relationship.State.Trust > 0.35, "The trusted main-user interaction did not update the relationship score.");
-            Check.True(model.Calls.Single().Any(m => m.Text.Contains("SEPARATE RELATIONSHIP RECORD")), "The model did not receive separate relationship context.");
+            Check.Equal(2,model.Calls.Count);
+            Check.True(model.Calls.Any(call=>call.Any(m=>m.Text.Contains("RELATIONSHIP",StringComparison.OrdinalIgnoreCase))), "The model did not receive separate relationship context during state maintenance.");
             await fixture.Memory.ForgetAsync();
             Check.Equal(0, fixture.Memory.Recent.Count);
             var afterForget = await OpenRelationshipAsync(root);
@@ -53,8 +54,11 @@ internal static class RelationshipEngineTests
         await suite.Case("unknown and other speakers cannot overwrite the main user's relationship or change warmth trust and closeness", async root =>
         {
             var model = new ScriptedModel(
+                "I enjoyed that exchange too, Alex.",
                 Decision("Warm toward Alex while learning their preferences.", "Alex was considerate.", new() { Warmth = 0.02, Trust = 0.02, Closeness = 0.01 }),
+                "That sounded hostile, but I will keep the speakers separate.",
                 Decision("Unrelated stranger's hostility must not replace this.", "A stranger was rude.", new() { Warmth = -0.03, Trust = -0.03, Closeness = -0.03, Stress = 0.02 }),
+                "I can hear Alice's request without attributing it to Alex.",
                 Decision("Another person's demands must not replace this.", "Alice demanded attention.", new() { Warmth = -0.03, Trust = -0.03, Closeness = -0.03, Stress = 0.02 }));
             await using var fixture = await Fixture.CreateAsync(root, model);
             await fixture.Engine.RespondAsync("I enjoyed talking with you.", "user", false, false, CancellationToken.None);
@@ -71,13 +75,14 @@ internal static class RelationshipEngineTests
             Check.Equal(baseline.Trust, fixture.Emotions.State.Trust);
             Check.Equal(baseline.Closeness, fixture.Emotions.State.Closeness);
             Check.True(fixture.Emotions.State.Stress > baselineStress, "Other speakers should still be able to affect transient mood without changing the user's relationship.");
-            Check.Equal(3, model.Calls.Count);
+            Check.Equal(6, model.Calls.Count);
         });
 
         await suite.Case("an autonomous file proposal does not revise the main-user relationship or trust", async root =>
         {
             var args = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new { path = "documents/idea.md", content = "A useful note proposed during a quiet moment." }))!;
             var model = new ScriptedModel(
+                "I will leave room for quiet, Alex.",
                 Decision("A stable, friendly attitude toward Alex.", "Alex asked for a calm workspace.", new() { Trust = 0.02 }),
                 Decision("This autonomous guess must not become the user's relationship.", "The character had an idea while alone.", new() { Warmth = 0.03, Trust = 0.03, Closeness = 0.03 }, [new("create_file", args)], speak: false));
             await using var fixture = await Fixture.CreateAsync(root, model);
@@ -98,7 +103,7 @@ internal static class RelationshipEngineTests
             Check.Equal(baseline.Trust, fixture.Emotions.State.Trust);
             Check.True(fixture.Output.Lines.Any(s => s.Contains("[Approval") && s.Contains("character initiative")), "The autonomous file action was not staged as a reviewable proposal.");
             Check.True(!File.Exists(Path.Combine(root, "documents", "idea.md")), "The pending autonomous file proposal wrote the target before approval.");
-            Check.Equal(2, model.Calls.Count);
+            Check.Equal(3, model.Calls.Count);
         });
     }
 
@@ -116,7 +121,7 @@ internal static class RelationshipEngineTests
         {
             ct.ThrowIfCancellationRequested();
             Calls.Add(messages.ToArray());
-            if (!json || Calls.Count > responses.Length) throw new InvalidOperationException("Unexpected model call in a relationship integration test.");
+            if (Calls.Count > responses.Length) throw new InvalidOperationException("Unexpected model call in a relationship integration test.");
             return Task.FromResult(responses[Calls.Count - 1]);
         }
     }

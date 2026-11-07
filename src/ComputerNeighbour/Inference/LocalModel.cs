@@ -7,9 +7,11 @@ using ComputerNeighbour.Platform;
 namespace ComputerNeighbour.Inference;
 
 public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
+public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning }
 public interface IChatModel
 {
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct);
+    Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,ct);
 }
 
 public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, IAsyncDisposable
@@ -18,9 +20,9 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     {"type":"object","additionalProperties":false,"required":["speak","reply","memory","emotion","relationship","actions"],"properties":{
       "speak":{"type":"boolean"},"reply":{"type":"string","maxLength":4000},"memory":{"type":"string","maxLength":1000},
       "emotion":{"type":"object","additionalProperties":false,"required":["warmth","trust","closeness","valence","energy","stress","curiosity","reason"],"properties":{
-        "warmth":{"type":"number","minimum":-0.03,"maximum":0.03},"trust":{"type":"number","minimum":-0.03,"maximum":0.03},"closeness":{"type":"number","minimum":-0.03,"maximum":0.03},
-        "valence":{"type":"number","minimum":-0.03,"maximum":0.03},"energy":{"type":"number","minimum":-0.03,"maximum":0.03},"stress":{"type":"number","minimum":-0.03,"maximum":0.03},"curiosity":{"type":"number","minimum":-0.03,"maximum":0.03},"reason":{"type":"string","maxLength":160}}},
-      "relationship":{"type":"object","additionalProperties":false,"required":["currentAttitude","recentImpression","appreciates","concerns","boundaries"],"properties":{"currentAttitude":{"type":"string","maxLength":500},"recentImpression":{"type":"string","maxLength":300},"appreciates":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}},"concerns":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}},"boundaries":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}}}},
+        "warmth":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"trust":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"closeness":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},
+        "valence":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"energy":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"stress":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"curiosity":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"reason":{"type":"string","maxLength":160}}},
+      "relationship":{"type":"object","additionalProperties":false,"required":["currentAttitude","recentImpression","appreciates","concerns","boundaries"],"properties":{"currentAttitude":{"type":["string","null"],"maxLength":500},"recentImpression":{"type":["string","null"],"maxLength":300},"appreciates":{"type":["array","null"],"maxItems":5,"items":{"type":"string","maxLength":160}},"concerns":{"type":["array","null"],"maxItems":5,"items":{"type":"string","maxLength":160}},"boundaries":{"type":["array","null"],"maxItems":5,"items":{"type":"string","maxLength":160}}}},
       "actions":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["tool","args"],"properties":{"tool":{"type":"string","maxLength":80},"args":{"type":"object"}}}}
     }}
     """);
@@ -71,11 +73,14 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
             await Task.Delay(500, startup.Token);
         }
     }
-    public async Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct)
+    public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct)=>RequestAsync(messages,json,json?0.25:0.25,false,ct);
+    public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct);
+    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct)
     {
         messages = await FitContextAsync(messages, json ? options.MaxReplyTokens : 1800, ct);
         var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:image/png;base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
-        var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = json ? options.Temperature : 0.25, ["max_tokens"] = json ? options.MaxReplyTokens : 1800, ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = false } };
+        var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = json||dialogue ? options.MaxReplyTokens : 1800, ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = false } };
+        if(dialogue){body["repeat_penalty"]=1.1;body["repeat_last_n"]=256;body["top_p"]=0.9;}
         if (json) body["response_format"] = new { type = "json_object", schema=DecisionSchema };
         using var response = await client.PostAsJsonAsync("v1/chat/completions", body, ct);
         if (!response.IsSuccessStatusCode)

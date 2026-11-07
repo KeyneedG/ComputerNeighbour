@@ -115,7 +115,7 @@ internal static class EngineTests
                 "{\"reply\":\"Incomplete schema\",\"actions\":[{\"tool\":\"open_app\",\"args\":{\"name\":\"notepad\"}}]}");
             await using var fixture = await Fixture.CreateAsync(root, model);
             var rejected = false;
-            try { await fixture.Engine.RespondAsync("Hello.", "user", false, false, CancellationToken.None); }
+            try { await fixture.Engine.RespondAsync("Would you inspect documents/example.md?", "user", false, false, CancellationToken.None); }
             catch (Exception e) when (e is JsonException or InvalidDataException) { rejected = true; }
             Check.True(rejected, "An incomplete or malformed decision was accepted.");
             Check.Equal(2, model.Calls.Count);
@@ -124,10 +124,10 @@ internal static class EngineTests
         });
         await suite.Case("Russian model output is retried before an English response is printed", async root =>
         {
-            var model = new ScriptedModel(Decision("Это ответ на русском языке."), Decision("I understand Russian and will answer in English."));
+            var model = new ScriptedModel("Это ответ на русском языке.", "I understand Russian and will answer in English.", Decision(speak:false));
             await using var fixture = await Fixture.CreateAsync(root, model);
             await fixture.Engine.RespondAsync("Ты понимаешь русский?", "user", false, false, CancellationToken.None);
-            Check.Equal(2, model.Calls.Count);
+            Check.Equal(3, model.Calls.Count);
             Check.True(fixture.Output.Lines.Any(l => l.Contains("I understand Russian and will answer in English.")), "The valid English retry was not printed.");
             Check.True(!fixture.Output.Lines.Any(l => l.Contains("Это ответ")), "Rejected Russian output was printed.");
         });

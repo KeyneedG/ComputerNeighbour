@@ -28,13 +28,24 @@ public static class Program
             var config=AppConfig.Load(paths);
             var desktop=new WindowsDesktop(config.Desktop);
             await using var audio=new AudioService(paths.Root,config.Audio);
-            if(args.Contains("--init")) { await new RelationshipStore(paths.Root,config.UserName).InitializeAsync(shutdown.Token);ui.Write("Configuration ready: "+paths.Inside("config/appsettings.json")+"\nRelationship ready: "+paths.Inside("data/personality/relationship.json"));return 0; }
+            if(args.Contains("--init"))
+            {
+                var profile=new UserProfileStore(paths.Root,config.UserName);await profile.InitializeAsync(shutdown.Token);
+                if(File.Exists(paths.Inside("data/memory/state.json")))
+                {
+                    var existing=new MemoryStore(paths.Root,config.Memory);await existing.InitializeAsync(shutdown.Token);
+                    foreach(var entry in existing.Recent.Where(e=>e.Role=="user"))await profile.ObserveAsync(entry.Text,entry.SpeakerId,shutdown.Token);
+                }
+                await new RelationshipStore(paths.Root,profile.PreferredName.Length>0?profile.PreferredName:config.UserName).InitializeAsync(shutdown.Token);
+                ui.Write("Configuration ready: "+paths.Inside("config/appsettings.json")+"\nGrounded user profile: "+paths.Inside("data/memory/user-profile.json"));return 0;
+            }
             if(args.Contains("--devices")) { ui.Write(audio.DescribeDevices());return 0; }
             if(args.Contains("--diagnose")) { Diagnose(paths,config,audio,ui);return 0; }
             var memory=new MemoryStore(paths.Root,config.Memory);await memory.InitializeAsync(shutdown.Token);
             var emotions=new EmotionEngine(paths.Root);await emotions.InitializeAsync(shutdown.Token);
             await using var model=new LocalModel(paths,config.Model);
-            ui.Write($"ComputerNeighbour · {config.CharacterName}\nStarting local model; this may take a moment. /help for commands.");
+            var version=typeof(Program).Assembly.GetName().Version?.ToString(3)??"0.2.0";
+            ui.Write($"ComputerNeighbour {version} · {config.CharacterName}\nModel: {Path.GetFileName(config.Model.ModelFile)}\nStarting local model; this may take a moment. /help for commands.");
             await model.StartAsync(shutdown.Token);
             using var weather=new WeatherService(config);
             await using var engine=new CompanionEngine(paths,config,model,memory,emotions,desktop,audio,ui,weather);
@@ -81,7 +92,7 @@ public static class Program
                             }
                         }
                         else if(evt.Kind is "text" or "voice") await engine.RespondAsync(evt.Text,evt.Speaker,false,false,shutdown.Token);
-                        else if(evt.Kind=="tick" && !engine.Paused && config.Proactive.Enabled)
+                        else if(evt.Kind=="tick" && !engine.Paused && config.Proactive.Enabled && engine.CanInitiate)
                         {
                             var now=DateTimeOffset.Now;var idle=desktop.GetIdleTime();
                             var window=config.Permissions.ForegroundWindow?desktop.GetForegroundContext():"";
@@ -90,9 +101,10 @@ public static class Program
                             wasAway=away;lastWindow=window;
                             var quiet=IsQuietHour(now.Hour,config.Proactive.QuietStartHour,config.Proactive.QuietEndHour);
                             var triggered=trigger!="Scheduled opportunity.";
-                            if(!quiet&&!away&&engine.UnansweredMessages<config.Proactive.MaxUnansweredMessages && now-lastOpportunity>TimeSpan.FromSeconds(config.Proactive.CooldownSeconds) && now-engine.LastInteraction>TimeSpan.FromSeconds(config.Proactive.CooldownSeconds) && (now>=nextOpportunity||triggered))
+                            var intervalScale=engine.InitiativeIntervalScale;
+                            if(!quiet&&!away&&engine.UnansweredMessages<config.Proactive.MaxUnansweredMessages && now-lastOpportunity>TimeSpan.FromSeconds(config.Proactive.CooldownSeconds*intervalScale) && now-engine.LastInteraction>TimeSpan.FromSeconds(config.Proactive.MinIntervalSeconds*intervalScale) && (now>=nextOpportunity||triggered))
                             {
-                                lastOpportunity=now;nextOpportunity=now.AddSeconds(Random.Shared.Next(config.Proactive.MinIntervalSeconds,config.Proactive.MaxIntervalSeconds+1));
+                                lastOpportunity=now;nextOpportunity=now.AddSeconds(Random.Shared.Next(config.Proactive.MinIntervalSeconds,config.Proactive.MaxIntervalSeconds+1)*intervalScale);
                                 await engine.RespondAsync(trigger,"environment",true,false,shutdown.Token);
                             }
                             if(memory.NeedsCompaction)await engine.CompactAsync(shutdown.Token);
