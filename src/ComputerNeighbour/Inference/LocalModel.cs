@@ -22,8 +22,9 @@ public interface ITurnContextModel
 public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, ITurnContextModel, IAsyncDisposable
 {
     private static readonly JsonElement ContextSchema=JsonSerializer.Deserialize<JsonElement>("""
-    {"type":"object","additionalProperties":false,"required":["intent"],"properties":{
-      "intent":{"type":"string","enum":["chat","screen","screen_followup","file_capability","web_capability","lookup_term"]}
+    {"type":"object","additionalProperties":false,"required":["intent","request","uncertainty","evidence"],"properties":{
+      "intent":{"type":"string","enum":["chat","screen","screen_followup","file_capability","web_capability","lookup_term"]},
+      "request":{"type":"string","maxLength":450},"uncertainty":{"type":"string","maxLength":180},"evidence":{"type":"string","maxLength":120}
     }}
     """);
     private static readonly JsonElement SketchSchema=JsonSerializer.Deserialize<JsonElement>("""
@@ -102,7 +103,7 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>
         purpose==GenerationPurpose.Sketch?RequestAsync(messages,true,.65,false,ct,SketchSchema,1350):
         RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct);
-    public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,64);
+    public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,320);
     private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null)
     {
         messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);

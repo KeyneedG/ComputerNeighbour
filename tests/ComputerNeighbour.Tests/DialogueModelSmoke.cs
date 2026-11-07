@@ -42,7 +42,7 @@ internal static class DialogueModelSmoke
         "Hello, User. What is your name? I'm here to help you."
     ];
 
-    public static async Task<int> RunAsync(PortablePaths portable,bool characterOnly=false)
+    public static async Task<int> RunAsync(PortablePaths portable,bool characterOnly=false,bool contextOnly=false)
     {
         var root=portable.Inside("data/development-checks/dialogue-smoke-"+DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(root);
@@ -61,6 +61,26 @@ internal static class DialogueModelSmoke
             await using var model=new LocalModel(portable,options);
             await model.StartAsync(ct);report.ModelStartupMs=startup.ElapsedMilliseconds;
             Console.WriteLine($"Dialogue acceptance model ready in {report.ModelStartupMs} ms: {report.ModelFile}");
+            if(contextOnly)
+            {
+                var contextRoot=Path.Combine(root,"context");
+                await using var fixture=await Fixture.CreateAsync(portable,contextRoot,model,ct);
+                report.Turns.Add(await TurnAsync(fixture,"I'm comparing WebP and PNG for image files. When I say the first format, I mean WebP.","context",1,ct));
+                report.Turns.Add(await TurnAsync(fixture,"а пирвый подайдет, если хочю файлы поменьше?","context",2,ct));
+                var thoughts=await fixture.Engine.GetThoughtsAsync(ct);
+                Check.True(thoughts.Contains("I read the request as:")&&thoughts.Contains("WebP",StringComparison.OrdinalIgnoreCase)
+                    &&thoughts.Contains("answered"),"The local context pass did not produce readable turn notes.");
+                using var journal=JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(contextRoot,"data","memory","thoughts.json"),ct));
+                var latest=journal.RootElement.EnumerateArray().Last();
+                Check.True(latest.GetProperty("interpretation").GetString()?.Contains("WebP",StringComparison.OrdinalIgnoreCase)==true,
+                    "The local context pass did not resolve 'the first format' from the conversation.");
+                Check.True(report.Turns[^1].Answer.Contains("WebP",StringComparison.OrdinalIgnoreCase),"The reply missed the referenced format.");
+                Check.True(report.Turns.All(t=>!ReplyQuality.ClaimsFreshScreenObservation(t.Answer)),"A plain chat turn claimed a fresh desktop view without an image.");
+                report.Passed=true;report.FinishedAt=DateTimeOffset.UtcNow;
+                await SaveReportAsync(reportPath,report,ct);
+                Console.WriteLine("PASS actual context rewrite, answer, and saved thought notes.\n"+thoughts);
+                return 0;
+            }
             if(characterOnly)
             {
                 var characterRoot=Path.Combine(root,"character");

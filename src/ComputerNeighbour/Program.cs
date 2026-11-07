@@ -108,6 +108,7 @@ public static class Program
                                 case "/approve": if(int.TryParse(arg,out var approve))await engine.ApproveAsync(approve,shutdown.Token);else ui.Write("Usage: /approve NUMBER");break;
                                 case "/reject": if(int.TryParse(arg,out var reject))engine.Reject(reject);else ui.Write("Usage: /reject NUMBER");break;
                                 case "/memory": ui.Write("Durable memory:\n"+memory.Summary);break;
+                                case "/thoughts": ui.Write(await engine.GetThoughtsAsync(shutdown.Token));break;
                                 case "/relationship": ui.Write(await engine.GetRelationshipAsync(shutdown.Token));break;
                                 case "/character": ui.Write(config.CharacterName+"'s developing character:\n"+emotions.DescribeGrowth());break;
                                 case "/browser": await engine.RespondAsync("Read the current browser page and summarize it.","user",false,false,shutdown.Token);break;
@@ -118,7 +119,7 @@ public static class Program
                                 case "/write":case "/create": await engine.RespondAsync("write "+arg,"user",false,false,shutdown.Token);break;
                                 case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
-                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory and saved web sources erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
+                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory, saved web sources and turn notes erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
                                 case "/look": if(!config.Permissions.ScreenCapture)ui.Write("Screen capture is disabled in config/appsettings.json.");else if(engine.Paused)ui.Write("Observation is paused; use /resume first.");else await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -216,6 +217,7 @@ public static class Program
     /devices       List input/output audio devices
     /status        Mood, boredom, loneliness, hurt and memory status
     /memory        Show compressed factual memory
+    /thoughts      Show recent interpretations, checks and turn outcomes
     /relationship  Show the separate persistent attitude toward the main user
     /character     Show developing and established habits and interests
     /compact       Compact memory now with the model

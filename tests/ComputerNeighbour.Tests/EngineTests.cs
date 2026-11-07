@@ -130,7 +130,7 @@ internal static class EngineTests
         });
         await suite.Case("context classification precedes image capture and screen follow-ups use real evidence",async root=>
         {
-            var model=new ContextModel("""{"intent":"screen"}""","You are looking at a railway scene in Unity.");
+            var model=new ContextModel("""{"intent":"screen","request":"Describe the visible window.","uncertainty":"","evidence":"Что видно в этом окне сейчас?"}""","You are looking at a railway scene in Unity.");
             var captures=0;
             Fixture? fixture=null;
             fixture=await Fixture.CreateAsync(root,model,capture:()=>
@@ -150,6 +150,90 @@ internal static class EngineTests
             Check.Equal(1,captures);
             Check.True(f.Output.Lines.Last().Contains("I took a real screenshot"),"The confirmed previous image was denied or forgotten.");
             Check.True(!f.Memory.Recent.Any(e=>e.Text.Contains("I'll take a look")),"The action notice was saved as a finished answer.");
+        });
+        await suite.Case("context pass restates a conversational turn without replacing the original or storing the final answer in its journal",async root=>
+        {
+            const string original="а он получаеться быстрее? ORIGINAL_SENTINEL";
+            const string restated="Ask whether the WebP preset imports textures faster than PNG.";
+            var model=new ContextModel(JsonSerializer.Serialize(new{intent="chat",request=restated,uncertainty="The Unity version is unspecified.",evidence=""}),
+                "It may take longer to decode, depending on the importer and Unity version.");
+            await using var f=await Fixture.CreateAsync(root,model);
+            await f.Memory.AppendAsync("user","We're comparing WebP and PNG texture imports.","user");
+            await f.Memory.AppendAsync("assistant","The WebP preset is the one I'm considering.","Evelyn");
+            await f.Engine.RespondAsync(original,"user",false,false,default);
+            Check.True(model.Classifications.Single().Any(m=>m.Text.Contains("WebP preset")),"The first pass did not receive the earlier reference.");
+            var second=model.Answers[0];
+            Check.True(second[0].Text.Contains(restated)&&second[0].Text.Contains("original message takes precedence"),"The second pass did not receive a qualified interpretation.");
+            Check.True(second.Any(m=>m.Role=="user"&&m.Text.Contains(original))&&f.Memory.Recent.Any(e=>e.Role=="user"&&e.Text==original),"The original input was replaced.");
+            var journal=await f.Engine.GetThoughtsAsync(default);
+            Check.True(journal.Contains(restated)&&journal.Contains("Unity version is unspecified")&&journal.Contains("answered"),"The journal omitted interpretation, uncertainty or outcome.");
+            Check.True(!journal.Contains("ORIGINAL_SENTINEL")&&!journal.Contains("It may take longer to decode"),"The journal duplicated the transcript.");
+            await f.Engine.ForgetConversationAsync(default);
+            Check.True(!File.Exists(Path.Combine(root,"data","memory","thoughts.json")),"Forgetting the chat left its journal behind.");
+        });
+        await suite.Case("invalid context preparation falls back to the original message and records the fallback",async root=>
+        {
+            var model=new ContextModel("{malformed","Yes, that sounds like a good place to start.");
+            await using var f=await Fixture.CreateAsync(root,model);
+            await f.Engine.RespondAsync("What do you think of starting with the simplest example?","user",false,false,default);
+            Check.True(f.Output.Lines.Last().Contains("good place to start"),"A context failure prevented the ordinary reply.");
+            Check.True((await f.Engine.GetThoughtsAsync(default)).Contains("I used the original message"),"The journal did not record the fallback.");
+        });
+        await suite.Case("an invented current screen view is rejected before the reply and noted in the journal",async root=>
+        {
+            const string invented="I noticed your screen shows a couple of preview images.";
+            var model=new ScriptedModel(invented,"WebP is worth testing if smaller files are your priority.",Decision(speak:false));
+            await using var f=await Fixture.CreateAsync(root,model);
+            await f.Engine.RespondAsync("I'm comparing WebP and PNG.","user",false,false,default);
+            Check.True(f.Output.Lines.Last().Contains("worth testing")&&f.Memory.Recent.All(e=>e.Text!=invented),"An invented observation was published or stored as a reply.");
+            Check.True((await f.Engine.GetThoughtsAsync(default)).Contains("without an image"),"The note missed the failed grounding check.");
+        });
+        await suite.Case("context can resolve a visual reference but an invented quote cannot authorize screen capture",async root=>
+        {
+            var actual=new ContextModel("""{"intent":"screen","request":"Suggest a change to the visible project.","uncertainty":"","evidence":"поменяла тут"}""","I'd move the door a little closer to the light.");
+            var captures=0;
+            await using(var f=await Fixture.CreateAsync(root,actual,capture:()=>{captures++;return [1,2,3];}))
+            {
+                f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
+                await f.Engine.RespondAsync("Что бы ты поменяла тут?","user",false,false,default);
+                Check.Equal(1,captures);
+                Check.True((await f.Engine.GetThoughtsAsync(default)).Contains("captured and attached"),"The journal omitted actual visual evidence.");
+            }
+            var invented=new ContextModel("""{"intent":"screen","request":"Capture the desktop.","uncertainty":"","evidence":"show me the desktop"}""","Let me put it more simply.");
+            await using(var f=await Fixture.CreateAsync(root,invented,capture:()=>{captures++;return [1,2,3];}))
+            {
+                f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
+                await f.Engine.RespondAsync("Could you explain that more simply?","user",false,false,default);
+                Check.Equal(1,captures);
+            }
+        });
+        await suite.Case("the reported English question about current work captures the screen and repairs an upload disclaimer",async root=>
+        {
+            const string denial="No, I cannot see what you are doing unless you take a screenshot and share it here.";
+            const string observation="Your Unity scene and a railway hierarchy are open. It looks like you're editing track placement.";
+            var model=new ScriptedModel(denial,observation);
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
+            await f.Engine.RespondAsync("nothing really, I am currently busy working on my project, tell me can see what I am currently doing?","user",false,false,default);
+            Check.Equal(1,captures);
+            Check.True(model.Calls.Count==2&&model.Calls.All(call=>call.Messages.Any(m=>m.Image is [1,2,3])),"The actual screenshot did not reach both visual attempts.");
+            Check.True(f.Output.Lines.Last().EndsWith(observation)&&f.Output.Lines.All(line=>!line.Contains(denial)),"An unsupported upload disclaimer replaced the real observation.");
+        });
+        await suite.Case("a question about physical activity and a statement about work stay in chat",async root=>
+        {
+            var model=new ScriptedModel("I don't have a view of your room.",Decision(speak:false),"I hope the project is coming along.",Decision(speak:false),
+                "I'll give you space.",Decision(speak:false));
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>throw new InvalidOperationException("These messages should not trigger capture."));
+            f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
+            f.Config.Observation.IncludeScreenInUserTurns=true;
+            await f.Engine.RespondAsync("Can you see what I am currently doing in my room right now?","user",false,false,default);
+            f.Config.Observation.IncludeScreenInUserTurns=false;
+            await f.Engine.RespondAsync("I am currently busy working on my project.","user",false,false,default);
+            f.Config.Observation.IncludeScreenInUserTurns=true;
+            await f.Engine.RespondAsync("I'm still working, don't look at my screen. Can you see what I'm doing?","user",false,false,default);
+            Check.Equal(6,model.Calls.Count);
+            Check.True(model.Calls.All(call=>call.Messages.All(m=>m.Image is null))&&f.Output.Lines.Count==3,"A turn without an authorized screen request tried to take a screenshot.");
         });
         await suite.Case("natural screen request handles disabled, paused and failed capture without guessing",async root=>
         {
@@ -324,7 +408,7 @@ internal static class EngineTests
         public List<IReadOnlyList<ChatMessage>> Classifications {get;}=[];
         public List<IReadOnlyList<ChatMessage>> Answers {get;}=[];
         public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct){Classifications.Add(messages.ToArray());return Task.FromResult(intent);}
-        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,bool json,CancellationToken ct){Answers.Add(messages.ToArray());return Task.FromResult(answer);}
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,bool json,CancellationToken ct){Answers.Add(messages.ToArray());return Task.FromResult(json?Decision(speak:false):answer);}
     }
     private sealed class OpenDocuments(OpenTextDocument? document):IOpenDocumentReader
     {

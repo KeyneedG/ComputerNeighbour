@@ -19,6 +19,7 @@ public sealed class AppConfig
     public ObservationOptions Observation { get; set; } = new();
     public ProactiveOptions Proactive { get; set; } = new();
     public NeedsOptions Needs { get; set; } = new();
+    public TurnProcessingOptions TurnProcessing { get; set; } = new();
     public PermissionOptions Permissions { get; set; } = new();
     public WeatherOptions Weather { get; set; } = new();
     public BrowserOptions Browser { get; set; } = new();
@@ -37,7 +38,7 @@ public sealed class AppConfig
 
     public void Validate(PortablePaths paths)
     {
-        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Needs is null || Permissions is null || Weather is null || Browser is null || Internet is null)
+        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Needs is null || TurnProcessing is null || Permissions is null || Weather is null || Browser is null || Internet is null)
             throw new InvalidDataException("Configuration sections cannot be null.");
         if (string.IsNullOrWhiteSpace(CharacterName) || CharacterName.Length>80 || string.IsNullOrWhiteSpace(UserName) || UserName.Length>80)
             throw new InvalidDataException("Character/user names must contain 1–80 characters.");
@@ -119,6 +120,11 @@ public sealed class NeedsOptions
     public bool OpenPaint { get; set; } = true;
     public int SketchIdleSeconds { get; set; } = 480;
     public int SketchCooldownMinutes { get; set; } = 60;
+}
+public sealed class TurnProcessingOptions
+{
+    public bool RefineInput { get; set; } = true;
+    public bool KeepThoughtJournal { get; set; } = true;
 }
 public sealed class PermissionOptions
 {
