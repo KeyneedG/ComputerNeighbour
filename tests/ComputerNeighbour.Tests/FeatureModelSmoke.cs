@@ -17,7 +17,7 @@ namespace ComputerNeighbour.Tests;
 /// <summary>Optional real-model check; all sample user data stays in an isolated portable fixture.</summary>
 internal static class FeatureModelSmoke
 {
-    public static async Task<int> RunAsync(PortablePaths portable,string? redScreenFixture=null)
+    public static async Task<int> RunAsync(PortablePaths portable,string? redScreenFixture=null,bool sketchOnly=false)
     {
         var root=portable.Inside("data/development-checks/feature-smoke-"+DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         var paths=new PortablePaths(root);Directory.CreateDirectory(root);
@@ -33,6 +33,15 @@ internal static class FeatureModelSmoke
         try
         {
             await using var model=new LocalModel(portable,modelOptions);await model.StartAsync(ct);
+            if(sketchOnly)
+            {
+                var drawing=await SketchActivity.CreateAsync(paths,config,model,
+                    "You are Evelyn. You have been curious about the little signals that guide a train at dusk. Choose your own geometric composition.",ct);
+                var png=await File.ReadAllBytesAsync(drawing.Path,ct);
+                Check.True(png.Length>100&&png.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}),"The real sketch was not rendered.");
+                Console.WriteLine($"PASS real model sketch: {drawing.Title}\n{drawing.Path}");
+                return 0;
+            }
             var memory=new MemoryStore(root,config.Memory);await memory.InitializeAsync(ct);
             var emotions=new EmotionEngine(root);await emotions.InitializeAsync(ct);
             await using var audio=new AudioService(root,config.Audio);using var weather=new WeatherService(config);

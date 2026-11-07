@@ -99,7 +99,7 @@ public static class Program
                             {
                                 case "/exit":case "/quit": shutdown.Cancel();break;
                                 case "/help": ui.Write(Help);break;
-                                case "/status": ui.Write($"Root: {paths.Root}\n{emotions.Status}\nMemory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={engine.Paused}; mute={engine.Muted}.");break;
+                                case "/status": ui.Write($"Root: {paths.Root}\n{emotions.Status}\n{engine.NeedsStatus}\nMemory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={engine.Paused}; mute={engine.Muted}.");break;
                                 case "/pause": engine.Paused=true;engine.InterruptSpeech();ui.Write("Observation and proactive comments paused. Text chat and held-key microphone remain available.");break;
                                 case "/resume": engine.Paused=false;ui.Write("Observation and proactive comments resumed.");break;
                                 case "/mute": engine.Muted=!engine.Muted;engine.InterruptSpeech();ui.Write("Voice muted: "+engine.Muted);break;
@@ -124,17 +124,27 @@ public static class Program
                             }
                         }
                         else if(evt.Kind is "text" or "voice") await engine.RespondAsync(evt.Text,evt.Speaker,false,false,shutdown.Token);
-                        else if(evt.Kind=="tick" && !engine.Paused && config.Proactive.Enabled && engine.CanInitiate)
+                        else if(evt.Kind=="tick")
                         {
-                            var now=DateTimeOffset.Now;var idle=desktop.GetIdleTime();
+                            var now=DateTimeOffset.Now;
+                            var idle=!engine.Paused&&config.Proactive.Enabled&&engine.CanInitiate?desktop.GetInteractiveIdleTime():null;
+                            var quiet=IsQuietHour(now.Hour,config.Proactive.QuietStartHour,config.Proactive.QuietEndHour);
+                            var intervalScale=engine.InitiativeIntervalScale;
+                            var cooldownOver=now-lastOpportunity>TimeSpan.FromSeconds(config.Proactive.CooldownSeconds*intervalScale);
+                            var handled=await engine.TickNeedsAsync(now,idle,quiet,cooldownOver,
+                                ()=>desktop.CanUseSketchWorkspace(checkLoad:true,maxSampleSeconds:Math.Max(15,config.Proactive.CheckSeconds*2.0)),
+                                ()=>desktop.GetInteractiveIdleTime()>=TimeSpan.FromSeconds(config.Needs.SketchIdleSeconds)&&desktop.CanUseSketchWorkspace(checkLoad:false),
+                                shutdown.Token);
+                            if(handled)lastOpportunity=now;
+                            if(idle is not {} observedIdle)continue;
                             var window=config.Permissions.ForegroundWindow?desktop.GetForegroundContext():"";
-                            var away=idle.TotalSeconds>=config.Proactive.AwayAfterSeconds;
+                            var away=observedIdle.TotalSeconds>=config.Proactive.AwayAfterSeconds;
                             var trigger=config.Proactive.TriggerOnReturnFromIdle&&wasAway&&!away?"User returned from inactivity.":config.Proactive.TriggerOnWindowChange&&lastWindow!=""&&window!=lastWindow?"The active window changed: "+window:"Scheduled opportunity.";
                             wasAway=away;lastWindow=window;
-                            var quiet=IsQuietHour(now.Hour,config.Proactive.QuietStartHour,config.Proactive.QuietEndHour);
                             var triggered=trigger!="Scheduled opportunity.";
-                            var intervalScale=engine.InitiativeIntervalScale;
-                            if(!quiet&&!away&&engine.UnansweredMessages<config.Proactive.MaxUnansweredMessages && now-lastOpportunity>TimeSpan.FromSeconds(config.Proactive.CooldownSeconds*intervalScale) && now-engine.LastInteraction>TimeSpan.FromSeconds(config.Proactive.MinIntervalSeconds*intervalScale) && (now>=nextOpportunity||triggered))
+                            var remarkLimit=config.Proactive.MaxUnansweredMessages;
+                            if(config.Needs.Enabled&&config.Needs.InviteWhenLonely&&remarkLimit>1)remarkLimit--;
+                            if(!handled&&!engine.WaitingForCompanyReply&&!quiet&&!away&&engine.UnansweredMessages<remarkLimit && cooldownOver && now-engine.LastInteraction>TimeSpan.FromSeconds(config.Proactive.MinIntervalSeconds*intervalScale) && (now>=nextOpportunity||triggered))
                             {
                                 lastOpportunity=now;nextOpportunity=now.AddSeconds(Random.Shared.Next(config.Proactive.MinIntervalSeconds,config.Proactive.MaxIntervalSeconds+1)*intervalScale);
                                 await engine.RespondAsync(trigger,"environment",true,false,shutdown.Token);
@@ -155,7 +165,7 @@ public static class Program
     public static bool IsQuietHour(int hour,int start,int end)=>start==end?false:start<end?hour>=start&&hour<end:hour>=start||hour<end;
     private static async Task ReadInputAsync(ChannelWriter<AppEvent> writer,ConsoleUi ui,CompanionEngine engine,CancellationToken ct)
     {
-        try {while(!ct.IsCancellationRequested) {var line=await ui.ReadLineAsync(ct);if(line is null) {await writer.WriteAsync(new("exit","","user"),ct);return;} if(!string.IsNullOrWhiteSpace(line)) {engine.InterruptSpeech();await writer.WriteAsync(new("text",line,"user"),ct);}}}catch(OperationCanceledException) { }
+        try {while(!ct.IsCancellationRequested) {var line=await ui.ReadLineAsync(ct);if(line is null) {engine.InterruptActivity();await writer.WriteAsync(new("exit","","user"),ct);return;} if(!string.IsNullOrWhiteSpace(line)) {engine.InterruptActivity();engine.InterruptSpeech();await writer.WriteAsync(new("text",line,"user"),ct);}}}catch(OperationCanceledException) { }
     }
     private static async Task MicrophoneAsync(ChannelWriter<AppEvent> writer,AppConfig config,WindowsDesktop desktop,AudioService audio,ConsoleUi ui,CompanionEngine engine,CancellationToken ct)
     {
@@ -204,7 +214,7 @@ public static class Program
     /mute          Toggle spoken replies
     /enroll NAME   Enroll the next held-key recording as a speaker (speak alone)
     /devices       List input/output audio devices
-    /status        Mood, relationship and memory status
+    /status        Mood, boredom, loneliness, hurt and memory status
     /memory        Show compressed factual memory
     /relationship  Show the separate persistent attitude toward the main user
     /character     Show developing and established habits and interests

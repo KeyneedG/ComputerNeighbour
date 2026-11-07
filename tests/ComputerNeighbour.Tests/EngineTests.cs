@@ -20,6 +20,60 @@ internal static class EngineTests
 
     public static async Task RunAsync(Suite suite)
     {
+        await suite.Case("loneliness makes one invitation and hurt needs input after the unanswered invitation",async root=>
+        {
+            var model=new ScriptedModel("Sure, let's pick it up.",Decision(speak:false));
+            await using var f=await Fixture.CreateAsync(root,model);
+            f.Engine.Paused=false;f.Config.Proactive.RequireFirstUserMessage=false;
+            f.Config.Needs.LonelinessMinutes=1;f.Config.Needs.InvitationPatienceMinutes=1;
+            var now=DateTimeOffset.Now;
+            Task<bool> Tick(int seconds,TimeSpan? idle)=>f.Engine.TickNeedsAsync(now.AddSeconds(seconds),idle,false,true,()=>false,()=>false,default);
+            await Tick(0,null);
+            await Tick(30,TimeSpan.FromMinutes(10));
+            await Tick(60,TimeSpan.FromMinutes(10));
+            Check.Equal(0,f.Output.Lines.Count);
+            await Tick(90,TimeSpan.FromSeconds(2));
+            Check.True(f.Engine.WaitingForCompanyReply&&f.Output.Lines.Single().Contains("a little company"),"Loneliness did not produce one optional invitation.");
+            await Tick(120,TimeSpan.FromSeconds(35)); // Last input was before the invitation.
+            await Tick(150,TimeSpan.FromMinutes(15));
+            Check.True(f.Engine.NeedsStatus.Contains("hurt=0"),"Being away was interpreted as ignoring Evelyn.");
+            await Tick(180,TimeSpan.FromSeconds(2));
+            Check.True(f.Engine.NeedsStatus.Contains("hurt=35"),"An unanswered invitation with newer activity did not affect mood.");
+            Check.Equal(1,f.Output.Lines.Count);
+            await f.Engine.RespondAsync("I'm back, we can talk now.","user",false,false,default);
+            Check.True(!f.Engine.WaitingForCompanyReply&&!f.Engine.NeedsStatus.Contains("hurt=35"),"An actual reply did not clear the invitation and ease the mood.");
+        });
+        await suite.Case("boredom draws an image only in a permitted idle workspace and saves a portable PNG",async root=>
+        {
+            var model=new ScriptedModel("""
+                {"title":"Sun above the valley","background":"#112244","shapes":[
+                  {"kind":"ellipse","color":"#FFCC66","x":35,"y":10,"w":25,"h":35},
+                  {"kind":"triangle","color":"#775599","x":0,"y":25,"w":80,"h":75},
+                  {"kind":"rectangle","color":"#226666","x":0,"y":85,"w":100,"h":15}]}
+                """);
+            var launchPaths=new List<string>();
+            await using var f=await Fixture.CreateAsync(root,model,openSketch:path=>{launchPaths.Add(path);return true;});
+            f.Engine.Paused=false;f.Config.Proactive.RequireFirstUserMessage=false;
+            f.Config.Needs.DrawWhenBored=true;f.Config.Needs.BoredomMinutes=1;
+            var now=DateTimeOffset.Now;
+            Task<bool> Tick(int seconds,TimeSpan idle,bool quiet,bool ready)=>f.Engine.TickNeedsAsync(now.AddSeconds(seconds),idle,quiet,false,()=>ready,
+                ()=>Directory.GetFiles(Path.Combine(root,"documents","evelyn-sketches"),"*.png").Length==1,default);
+            var away=TimeSpan.FromMinutes(15);
+            await Tick(0,away,false,false);await Tick(30,away,false,false);await Tick(60,away,false,false);
+            await Tick(90,TimeSpan.Zero,false,true);
+            await Tick(120,away,true,true);
+            f.Config.Permissions.WriteFiles=false;await Tick(150,away,false,true);f.Config.Permissions.WriteFiles=true;
+            Check.Equal(0,model.Calls.Count);
+            Check.True(await Tick(180,away,false,true),"The idle hobby did not start after passing its checks.");
+            var png=Directory.GetFiles(Path.Combine(root,"documents","evelyn-sketches"),"*.png").Single();
+            var bytes=await File.ReadAllBytesAsync(png);
+            Check.True(bytes.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10})&&bytes.Length>100,"The saved drawing is not a PNG.");
+            Check.Equal(png,launchPaths.Single(),"Paint was not given the completed image after the second idle check.");
+            Check.True(f.Memory.Recent.Any(e=>e.Role=="note"&&e.Text.Contains("Sun above the valley")),"The sketch was not recorded.");
+            Check.True(f.Engine.NeedsStatus.Contains("Boredom=12"),"Drawing did not lower boredom.");
+            await Tick(210,away,false,true);await Tick(240,away,false,true);
+            Check.Equal(1,model.Calls.Count);
+        });
         await suite.Case("explicit read requests are grounded in actual article text before the first model call", async root =>
         {
             var model = new ScriptedModel(
@@ -290,7 +344,7 @@ internal static class EngineTests
         public required AudioService Audio { get; init; }
         public required WeatherService Weather { get; init; }
         public required CapturingOutput Output { get; init; }
-        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null)
+        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null)
         {
             var paths = new PortablePaths(root);
             var config = new AppConfig();
@@ -309,7 +363,7 @@ internal static class EngineTests
             return new Fixture
             {
                 Config = config, Memory = memory, Audio = audio, Weather = weather, Output = output,
-                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,openDocuments:openDocuments,captureScreen:capture) { Paused = true }
+                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch) { Paused = true }
             };
         }
         public async ValueTask DisposeAsync()

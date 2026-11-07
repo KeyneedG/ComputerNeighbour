@@ -18,6 +18,7 @@ public sealed class AppConfig
     public PlatformOptions Desktop { get; set; } = new();
     public ObservationOptions Observation { get; set; } = new();
     public ProactiveOptions Proactive { get; set; } = new();
+    public NeedsOptions Needs { get; set; } = new();
     public PermissionOptions Permissions { get; set; } = new();
     public WeatherOptions Weather { get; set; } = new();
     public BrowserOptions Browser { get; set; } = new();
@@ -36,7 +37,7 @@ public sealed class AppConfig
 
     public void Validate(PortablePaths paths)
     {
-        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Permissions is null || Weather is null || Browser is null || Internet is null)
+        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Needs is null || Permissions is null || Weather is null || Browser is null || Internet is null)
             throw new InvalidDataException("Configuration sections cannot be null.");
         if (string.IsNullOrWhiteSpace(CharacterName) || CharacterName.Length>80 || string.IsNullOrWhiteSpace(UserName) || UserName.Length>80)
             throw new InvalidDataException("Character/user names must contain 1–80 characters.");
@@ -46,6 +47,9 @@ public sealed class AppConfig
             throw new InvalidDataException("Invalid context size, reply token limit or request timeout.");
         if (Proactive.MinIntervalSeconds < 10 || Proactive.MaxIntervalSeconds < Proactive.MinIntervalSeconds || Proactive.MaxIntervalSeconds > 86400 || Proactive.CooldownSeconds < 5 || Proactive.CheckSeconds < 2 || Proactive.QuietStartHour is <0 or >23 || Proactive.QuietEndHour is <0 or >23 || Proactive.MaxUnansweredMessages < 0)
             throw new InvalidDataException("Invalid proactive intervals.");
+        if(Needs.BoredomMinutes is <1 or >1440||Needs.LonelinessMinutes is <1 or >1440||Needs.InvitationPatienceMinutes is <1 or >1440||
+            Needs.RecentInputSeconds is <10 or >300||Needs.SketchIdleSeconds is <60 or >86400||Needs.SketchCooldownMinutes is <5 or >1440)
+            throw new InvalidDataException("Invalid needs or sketch intervals.");
         if (Observation.ScreenIntervalSeconds < 10 || Audio.MaxRecordingSeconds < 1 || Audio.MaxRecordingSeconds > 300)
             throw new InvalidDataException("Invalid observation / audio interval.");
         if (Weather.Latitude is < -90 or > 90 || Weather.Longitude is < -180 or > 180 || Weather.RefreshMinutes < 10)
@@ -102,6 +106,19 @@ public sealed class ProactiveOptions
     public bool TriggerOnReturnFromIdle { get; set; } = true;
     public int AwayAfterSeconds { get; set; } = 300;
     public int MaxUnansweredMessages { get; set; } = 2;
+}
+public sealed class NeedsOptions
+{
+    public bool Enabled { get; set; } = true;
+    public int BoredomMinutes { get; set; } = 20;
+    public int LonelinessMinutes { get; set; } = 30;
+    public bool InviteWhenLonely { get; set; } = true;
+    public int RecentInputSeconds { get; set; } = 45;
+    public int InvitationPatienceMinutes { get; set; } = 12;
+    public bool DrawWhenBored { get; set; }
+    public bool OpenPaint { get; set; } = true;
+    public int SketchIdleSeconds { get; set; } = 480;
+    public int SketchCooldownMinutes { get; set; } = 60;
 }
 public sealed class PermissionOptions
 {

@@ -30,6 +30,7 @@ public sealed record EmotionState
     public long Interactions { get; init; }
     public string LastReason { get; init; } = "Initial character temperament";
     public IReadOnlyList<CharacterTrait> Traits { get; init; } = [];
+    public NeedLevels Needs { get; init; } = new();
 }
 
 /// <summary>Persistent simulated characterization, not claims of human feelings.</summary>
@@ -103,6 +104,20 @@ public sealed class EmotionEngine
 
     public string DescribeGrowth()=>CharacterGrowth.Describe(State.Traits);
 
+    public async Task SaveNeedsAsync(NeedLevels levels,CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if(!_initialized)throw new InvalidOperationException("Initialize personality before using it.");
+            if(_state.Needs==levels)return;
+            var next=_state with {Needs=levels};
+            await SaveAsync(next,ct);
+            Volatile.Write(ref _state,next);
+        }
+        finally{_gate.Release();}
+    }
+
     public async Task ApplyAsync(EmotionDelta? delta, CancellationToken cancellationToken = default,CharacterGrowthUpdate? growth=null,string? observedUserText=null,string? completedReply=null)
     {
         if (!_initialized) throw new InvalidOperationException("Initialize personality before using it.");
@@ -155,7 +170,7 @@ public sealed class EmotionEngine
             ?? throw new InvalidDataException("Personality state is empty.");
         if (!double.IsFinite(state.Warmth) || !double.IsFinite(state.Trust) || !double.IsFinite(state.Valence) ||
             !double.IsFinite(state.Energy) || !double.IsFinite(state.Stress) || !double.IsFinite(state.Curiosity) || !double.IsFinite(state.Closeness) ||
-            state.LastReason is null || !CharacterGrowth.IsValid(state.Traits))
+            state.LastReason is null || !CharacterGrowth.IsValid(state.Traits) || state.Needs is null || !state.Needs.IsValid)
             throw new InvalidDataException("Personality state contains invalid values.");
         return state with
         {

@@ -15,6 +15,9 @@ public sealed class PlatformOptions
 /// <summary>Small Windows adapter. All handles are scoped; no hooks, services, or registry writes.</summary>
 public sealed class WindowsDesktop(PlatformOptions options)
 {
+    private ulong previousSystemIdle,previousSystemTotal;
+    private long previousCpuSampleAt;
+
     public string GetForegroundContext()
     {
         EnsureWindows();
@@ -29,11 +32,73 @@ public sealed class WindowsDesktop(PlatformOptions options)
         return $"Application: {name}; window: {title}";
     }
 
-    public TimeSpan GetIdleTime()
+    public TimeSpan GetIdleTime()=>ReadIdleTime()??TimeSpan.Zero;
+
+    public TimeSpan? GetInteractiveIdleTime()=>IsInteractiveDesktop()?ReadIdleTime():null;
+
+    private static TimeSpan? ReadIdleTime()
     {
         EnsureWindows();
         var info = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
-        return GetLastInputInfo(ref info) ? TimeSpan.FromMilliseconds(unchecked((uint)Environment.TickCount - info.Tick)) : TimeSpan.Zero;
+        return GetLastInputInfo(ref info) ? TimeSpan.FromMilliseconds(unchecked((uint)Environment.TickCount - info.Tick)) : null;
+    }
+
+    public bool CanUseSketchWorkspace(bool checkLoad,double maxSampleSeconds=15)
+    {
+        if(!IsInteractiveDesktop())return false;
+        var foreground=GetForegroundWindow();
+        var title=new StringBuilder(1024);
+        GetWindowText(foreground,title,title.Capacity);
+        if(IsExcluded(title.ToString()))return false;
+        GetWindowThreadProcessId(foreground,out var pid);
+        try
+        {
+            using var process=Process.GetProcessById((int)pid);
+            var foregroundName=process.ProcessName.ToLowerInvariant();
+            if(foregroundName is not ("explorer" or "windowsterminal" or "openconsole" or "conhost" or "computerneighbour" or "cmd" or "powershell" or "pwsh"))return false;
+        }
+        catch(Exception e) when(e is ArgumentException or InvalidOperationException or Win32Exception){return false;}
+        return !checkLoad||SystemIsQuiet(maxSampleSeconds);
+    }
+
+    private bool SystemIsQuiet(double maxSampleSeconds)
+    {
+        if(!GetSystemTimes(out var idle,out var kernel,out var user))return false;
+        var total=kernel+user;
+        var oldIdle=previousSystemIdle;
+        var oldTotal=previousSystemTotal;
+        var now=Environment.TickCount64;
+        var sampleAge=now-previousCpuSampleAt;
+        previousCpuSampleAt=now;
+        previousSystemIdle=idle;previousSystemTotal=total;
+        return sampleAge>=250&&sampleAge<=maxSampleSeconds*1000&&oldTotal!=0&&total>oldTotal&&idle>=oldIdle
+            &&(idle-oldIdle)/(double)(total-oldTotal)>=.75;
+    }
+
+    private static bool IsInteractiveDesktop()
+    {
+        if(!OperatingSystem.IsWindows()||GetForegroundWindow()==IntPtr.Zero)return false;
+        var input=OpenInputDesktop(0,false,1); // DESKTOP_READOBJECTS
+        if(input==IntPtr.Zero)return false;
+        try
+        {
+            var name=new StringBuilder(128);
+            return GetUserObjectInformation(input,2,name,(uint)(name.Capacity*sizeof(char)),out _)&&name.ToString().Equals("Default",StringComparison.OrdinalIgnoreCase);
+        }
+        finally{CloseDesktop(input);}
+    }
+
+    internal static bool TryOpenPaint(string image)
+    {
+        EnsureWindows();
+        var existing=Process.GetProcessesByName("mspaint");
+        foreach(var process in existing)process.Dispose();
+        var exe=Path.Combine(Environment.SystemDirectory,"mspaint.exe");
+        if(existing.Length>0||!File.Exists(exe))return false;
+        var start=new ProcessStartInfo(exe){UseShellExecute=false};
+        start.ArgumentList.Add(image);
+        using var paint=Process.Start(start);
+        return paint is not null;
     }
 
     public bool IsKeyDown(int virtualKey) => OperatingSystem.IsWindows() && (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
@@ -125,7 +190,7 @@ public sealed class WindowsDesktop(PlatformOptions options)
     private static Input KeyInput(ushort key, char character, uint flags) => new() { Type = 1, Data = new InputUnion { Keyboard = new KeyboardInput { VirtualKey = key, Scan = character, Flags = flags } } };
     private static void Send(Input[] inputs) { if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) != inputs.Length) throw new Win32Exception("Windows rejected input; elevated applications cannot be controlled from a normal process."); }
 
-    private static byte[] EncodePng(byte[] bgra, int width, int height)
+    internal static byte[] EncodePng(byte[] bgra, int width, int height)
     {
         using var output = new MemoryStream();
         output.Write([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -172,6 +237,10 @@ public sealed class WindowsDesktop(PlatformOptions options)
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder text, int count);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
     [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LastInputInfo info);
+    [DllImport("user32.dll")] private static extern IntPtr OpenInputDesktop(uint flags,bool inherit,uint access);
+    [DllImport("user32.dll")] private static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern bool GetUserObjectInformation(IntPtr handle,int index,StringBuilder result,uint bytes,out uint needed);
+    [DllImport("kernel32.dll")] private static extern bool GetSystemTimes(out ulong idle,out ulong kernel,out ulong user);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
