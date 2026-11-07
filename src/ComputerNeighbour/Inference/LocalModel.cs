@@ -27,7 +27,11 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     }}
     """);
     private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>("""
-    {"type":"object","additionalProperties":false,"required":["speak","reply","memory","emotion","relationship","actions"],"properties":{
+    {"type":"object","additionalProperties":false,"required":["growth","speak","reply","memory","emotion","relationship","actions"],"properties":{
+      "growth":{"anyOf":[{"type":"object","additionalProperties":false,"required":["action","kind","name","expression","evidence"],"properties":{
+        "action":{"type":"string","enum":["explore","reinforce","reconsider"]},"kind":{"type":"string","enum":["habit","interest"]},
+        "name":{"type":"string","maxLength":64},"expression":{"type":"string","maxLength":160},"evidence":{"type":"string","maxLength":120}
+      }},{"type":"null"}]},
       "speak":{"type":"boolean"},"reply":{"type":"string","maxLength":4000},"memory":{"type":"string","maxLength":1000},
       "emotion":{"type":"object","additionalProperties":false,"required":["warmth","trust","closeness","valence","energy","stress","curiosity","reason"],"properties":{
         "warmth":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"trust":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"closeness":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},

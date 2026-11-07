@@ -29,6 +29,7 @@ public sealed record EmotionState
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
     public long Interactions { get; init; }
     public string LastReason { get; init; } = "Initial character temperament";
+    public IReadOnlyList<CharacterTrait> Traits { get; init; } = [];
 }
 
 /// <summary>Persistent simulated characterization, not claims of human feelings.</summary>
@@ -87,7 +88,7 @@ public sealed class EmotionEngine
         var stress = Clamp01(state.Stress * (1 - relaxation * 0.65));
         var valence = Math.Clamp(state.Valence * (1 - relaxation * 0.5), -1, 1);
         var text = new StringBuilder();
-        text.AppendLine("SIMULATED CHARACTER STATE: this is characterization, never evidence of consciousness.");
+        text.AppendLine("CURRENT MOOD AND CONTEXT:");
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
             $"Relationship: warmth={state.Warmth:F2}, trust={state.Trust:F2}, closeness={state.Closeness:F2}. Mood: valence={valence:F2} (-1..1), energy={energy:F2}, stress={stress:F2}, curiosity={state.Curiosity:F2} (others 0..1)."));
         text.AppendLine($"Local time: {local:yyyy-MM-dd dddd HH:mm}; season: {Season(local.Month)}; time of day: {TimeOfDay(local.Hour)}.");
@@ -100,7 +101,9 @@ public sealed class EmotionEngine
         return text.ToString();
     }
 
-    public async Task ApplyAsync(EmotionDelta? delta, CancellationToken cancellationToken = default)
+    public string DescribeGrowth()=>CharacterGrowth.Describe(State.Traits);
+
+    public async Task ApplyAsync(EmotionDelta? delta, CancellationToken cancellationToken = default,CharacterGrowthUpdate? growth=null,string? observedUserText=null,string? completedReply=null)
     {
         if (!_initialized) throw new InvalidOperationException("Initialize personality before using it.");
         await _gate.WaitAsync(cancellationToken);
@@ -121,6 +124,7 @@ public sealed class EmotionEngine
                 Curiosity = Clamp01(current.Curiosity + Bound(delta.Curiosity, 0.08)),
                 Interactions = current.Interactions + 1,
                 UpdatedAt = DateTimeOffset.UtcNow,
+                Traits = CharacterGrowth.Apply(current.Traits,growth,observedUserText,completedReply),
                 LastReason = string.IsNullOrWhiteSpace(delta.Reason) ? current.LastReason : delta.Reason[..Math.Min(delta.Reason.Length, 300)]
             };
             await SaveAsync(next, cancellationToken);
@@ -150,7 +154,8 @@ public sealed class EmotionEngine
         var state = await JsonSerializer.DeserializeAsync<EmotionState>(file, Json, cancellationToken)
             ?? throw new InvalidDataException("Personality state is empty.");
         if (!double.IsFinite(state.Warmth) || !double.IsFinite(state.Trust) || !double.IsFinite(state.Valence) ||
-            !double.IsFinite(state.Energy) || !double.IsFinite(state.Stress) || !double.IsFinite(state.Curiosity) || !double.IsFinite(state.Closeness) || state.LastReason is null)
+            !double.IsFinite(state.Energy) || !double.IsFinite(state.Stress) || !double.IsFinite(state.Curiosity) || !double.IsFinite(state.Closeness) ||
+            state.LastReason is null || !CharacterGrowth.IsValid(state.Traits))
             throw new InvalidDataException("Personality state contains invalid values.");
         return state with
         {

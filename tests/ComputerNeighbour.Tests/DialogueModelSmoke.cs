@@ -42,7 +42,7 @@ internal static class DialogueModelSmoke
         "Hello, User. What is your name? I'm here to help you."
     ];
 
-    public static async Task<int> RunAsync(PortablePaths portable)
+    public static async Task<int> RunAsync(PortablePaths portable,bool characterOnly=false)
     {
         var root=portable.Inside("data/development-checks/dialogue-smoke-"+DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(root);
@@ -61,6 +61,33 @@ internal static class DialogueModelSmoke
             await using var model=new LocalModel(portable,options);
             await model.StartAsync(ct);report.ModelStartupMs=startup.ElapsedMilliseconds;
             Console.WriteLine($"Dialogue acceptance model ready in {report.ModelStartupMs} ms: {report.ModelFile}");
+            if(characterOnly)
+            {
+                var characterRoot=Path.Combine(root,"character");
+                await using(var fixture=await Fixture.CreateAsync(portable,characterRoot,model,ct))
+                {
+                    string[] prompts=
+                    [
+                        "My train signal in Unity went red when the track was empty. One forgotten axle counter had the whole railway held hostage. What strikes you about that?",
+                        "I liked your take on a tiny detail running the whole show. In another level, one badly placed sign confused every playtester. What connection do you see between those two stories?",
+                        "You're AI. Do you think talking together could make you a little more like a person? Tell me what you'd actually want to get better at."
+                    ];
+                    for(var i=0;i<prompts.Length;i++)
+                    {
+                        var turn=await TurnAsync(fixture,prompts[i],"character",i+1,ct);
+                        ValidateEnglish(turn.Answer);
+                        report.Turns.Add(turn);
+                    }
+                }
+                var character=new EmotionEngine(characterRoot);
+                await character.InitializeAsync(ct);
+                Console.WriteLine(character.DescribeGrowth());
+                Check.True(character.State.Traits.Count>0,"The real model did not discover a grounded habit or interest.");
+                report.Passed=true;report.FinishedAt=DateTimeOffset.UtcNow;
+                await SaveReportAsync(reportPath,report,ct);
+                Console.WriteLine("PASS actual character dialogue and persistence. Report: "+reportPath);
+                return 0;
+            }
 
             var replayRoot=Path.Combine(root,"fresh-replay");
             await using(var fixture=await Fixture.CreateAsync(portable,replayRoot,model,ct))

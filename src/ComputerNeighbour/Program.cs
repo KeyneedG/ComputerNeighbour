@@ -29,13 +29,24 @@ public static class Program
             var config=AppConfig.Load(paths);
             var desktop=new WindowsDesktop(config.Desktop);
             await using var audio=new AudioService(paths.Root,config.Audio);
+            var initiative=Array.IndexOf(args,"--initiative");
+            if(initiative>=0)
+            {
+                var mode=initiative+1<args.Length?args[initiative+1]:"";
+                if(mode is not ("more" or "less"))throw new ArgumentException("--initiative requires more or less.");
+                var profile=new UserProfileStore(paths.Root,config.UserName);
+                await profile.InitializeAsync(shutdown.Token);
+                await profile.ObserveAsync(mode=="more"?"Be more proactive.":"Be less proactive.","user",shutdown.Token);
+                ui.Write(mode=="more"?"Standard initiative pacing restored.":"Reduced initiative pacing enabled.");
+                return 0;
+            }
             if(args.Contains("--init"))
             {
                 var profile=new UserProfileStore(paths.Root,config.UserName);await profile.InitializeAsync(shutdown.Token);
                 if(File.Exists(paths.Inside("data/memory/state.json")))
                 {
                     var existing=new MemoryStore(paths.Root,config.Memory);await existing.InitializeAsync(shutdown.Token);
-                    foreach(var entry in existing.Recent.Where(e=>e.Role=="user"))await profile.ObserveAsync(entry.Text,entry.SpeakerId,shutdown.Token);
+                    foreach(var entry in existing.Recent.Where(e=>e.Role=="user"))await profile.ObserveAsync(entry.Text,entry.SpeakerId,shutdown.Token,entry.At);
                 }
                 await new RelationshipStore(paths.Root,profile.PreferredName.Length>0?profile.PreferredName:config.UserName).InitializeAsync(shutdown.Token);
                 ui.Write("Configuration ready: "+paths.Inside("config/appsettings.json")+"\nGrounded user profile: "+paths.Inside("data/memory/user-profile.json"));return 0;
@@ -98,6 +109,7 @@ public static class Program
                                 case "/reject": if(int.TryParse(arg,out var reject))engine.Reject(reject);else ui.Write("Usage: /reject NUMBER");break;
                                 case "/memory": ui.Write("Durable memory:\n"+memory.Summary);break;
                                 case "/relationship": ui.Write(await engine.GetRelationshipAsync(shutdown.Token));break;
+                                case "/character": ui.Write(config.CharacterName+"'s developing character:\n"+emotions.DescribeGrowth());break;
                                 case "/browser": await engine.RespondAsync("Read the current browser page and summarize it.","user",false,false,shutdown.Token);break;
                                 case "/read": await engine.RespondAsync("Read "+arg,"user",false,false,shutdown.Token);break;
                                 case "/search": await engine.RespondAsync("Search for "+arg,"user",false,false,shutdown.Token);break;
@@ -106,7 +118,7 @@ public static class Program
                                 case "/write":case "/create": await engine.RespondAsync("write "+arg,"user",false,false,shutdown.Token);break;
                                 case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
-                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory and saved web sources erased; profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
+                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory and saved web sources erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
                                 case "/look": if(!config.Permissions.ScreenCapture)ui.Write("Screen capture is disabled in config/appsettings.json.");else if(engine.Paused)ui.Write("Observation is paused; use /resume first.");else await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -195,6 +207,7 @@ public static class Program
     /status        Mood, relationship and memory status
     /memory        Show compressed factual memory
     /relationship  Show the separate persistent attitude toward the main user
+    /character     Show developing and established habits and interests
     /compact       Compact memory now with the model
     /forget CONFIRM Erase conversation memory
     /approve N     Approve a displayed computer action (expires in 2 minutes)

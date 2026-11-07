@@ -16,9 +16,9 @@ namespace ComputerNeighbour.Tests;
 /// <summary>Conversation contract checks, independent of exact model wording or live peripherals.</summary>
 internal static class ConversationQualityTests
 {
-    private static string Metadata(List<ToolRequest>? actions=null,string reply="")=>JsonSerializer.Serialize(new CompanionDecision
+    private static string Metadata(List<ToolRequest>? actions=null,string reply="",CharacterGrowthUpdate? growth=null)=>JsonSerializer.Serialize(new CompanionDecision
     {
-        Speak=false,Reply=reply,Memory="",Emotion=new(),Relationship=new(),Actions=actions??[]
+        Speak=false,Reply=reply,Memory="",Emotion=new(),Relationship=new(),Actions=actions??[],Growth=growth
     },AppConfig.Json);
     private static Dictionary<string,JsonElement> Args(object value)=>JsonSerializer.Deserialize<Dictionary<string,JsonElement>>(JsonSerializer.Serialize(value))!;
 
@@ -167,6 +167,43 @@ internal static class ConversationQualityTests
             Check.True(fixture.Memory.Recent.Where(e=>e.Role=="assistant").All(e=>e.Text!=wrong),"A false no-memory claim entered persistent conversation memory.");
             Check.Equal(3,model.Calls.Count);Check.True(!model.Calls[0].Json&&!model.Calls[1].Json&&model.Calls[2].Json,"Memory-capability repair did not retry speech before bookkeeping.");
         });
+        await suite.Case("character learns a tentative trait from a conversation, establishes it after restart, and revises it after feedback",async root=>
+        {
+            const string name="Playful design analogies";
+            const string first="My junction acts like a traffic light with stage fright.";
+            var proposal=new CharacterGrowthUpdate("explore","habit",name,"Make dry comparisons when a design detail behaves absurdly.","chose an audience");
+            await using(var f=await Fixture.CreateAsync(root,new ScriptedModel("It has one job and chose an audience.",Metadata(growth:proposal))))
+            {
+                await f.Engine.RespondAsync(first,"user",false,false,default);
+                Check.True(f.Emotions.DescribeGrowth().Contains("Exploring habit"),"The first signal should start an experiment.");
+                Check.Equal(1,f.Emotions.State.Traits.Single().Strength);
+            }
+            // Local models sometimes repeat explore for an existing label. A separate user signal can still confirm it.
+            var confirm=proposal with {Evidence="the shy junction"};
+            var reconsider=proposal with {Action="reconsider",Evidence="getting old"};
+            var model=new ScriptedModel("The other junction apparently wants a standing ovation.",Metadata(growth:confirm),
+                "I'll leave the junction out of the spotlight.",Metadata(growth:reconsider));
+            await using(var restarted=await Fixture.CreateAsync(root,model))
+            {
+                await restarted.Engine.RespondAsync("I laughed at the shy junction. The other one is even worse.","user",false,false,default);
+                Check.True(model.Calls[0].Messages[0].Text.Contains(name),"The restarted engine did not use its own evolving trait in dialogue.");
+                Check.True(restarted.Emotions.State.Traits.Single().Established,"Independent feedback did not establish the trait.");
+                await restarted.Engine.RespondAsync("The theatre jokes are getting old. Let's move on.","user",false,false,default);
+                Check.Equal(1,restarted.Emotions.State.Traits.Single().Strength,"Negative feedback did not soften the established tendency.");
+            }
+        });
+        await suite.Case("character growth requires current user evidence and cannot learn from guests or autonomous output",async root=>
+        {
+            var proposal=new CharacterGrowthUpdate("explore","interest","Odd junctions","Explore the small failures in track signalling.","junction");
+            var model=new ScriptedModel("That is a neat signal failure.",Metadata(growth:proposal),
+                "An unexpected result, sure.",Metadata(growth:proposal),
+                Metadata(growth:proposal));
+            await using var f=await Fixture.CreateAsync(root,model);
+            await f.Engine.RespondAsync("This junction breaks whenever I reset it.","guest",false,false,default);
+            await f.Engine.RespondAsync("I took a long walk yesterday.","user",false,false,default);
+            await f.Engine.RespondAsync("There is a junction on screen.","environment",true,false,default);
+            Check.Equal(0,f.Emotions.State.Traits.Count);
+        });
     }
 
     private static int Occurrences(string text,string value)
@@ -201,6 +238,7 @@ internal static class ConversationQualityTests
         public required AudioService Audio {get;init;}
         public required WeatherService Weather {get;init;}
         public required CapturingOutput Output {get;init;}
+        public required EmotionEngine Emotions {get;init;}
         public static async Task<Fixture> CreateAsync(string root,IChatModel model)
         {
             var paths=new PortablePaths(root);var config=new AppConfig();
@@ -213,7 +251,7 @@ internal static class ConversationQualityTests
             var memory=new MemoryStore(root,config.Memory);await memory.InitializeAsync();
             var emotions=new EmotionEngine(root);await emotions.InitializeAsync();
             var audio=new AudioService(root,config.Audio);var weather=new WeatherService(config);var output=new CapturingOutput();
-            return new() {Config=config,Memory=memory,Audio=audio,Weather=weather,Output=output,
+            return new() {Config=config,Memory=memory,Audio=audio,Weather=weather,Output=output,Emotions=emotions,
                 Engine=new(paths,config,model,memory,emotions,new WindowsDesktop(config.Desktop),audio,output,weather,new NoBrowser()) {Paused=true}};
         }
         public async ValueTask DisposeAsync(){await Engine.DisposeAsync();await Audio.DisposeAsync();Weather.Dispose();}

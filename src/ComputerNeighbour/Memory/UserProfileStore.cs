@@ -93,7 +93,7 @@ public sealed class UserProfileStore
         finally { gate.Release(); }
     }
 
-    public async Task ObserveAsync(string text, string speakerId, CancellationToken cancellationToken = default)
+    public async Task ObserveAsync(string text, string speakerId, CancellationToken cancellationToken = default,DateTimeOffset? observedAt=null)
     {
         ArgumentNullException.ThrowIfNull(text);
         await gate.WaitAsync(cancellationToken);
@@ -103,6 +103,7 @@ public sealed class UserProfileStore
             if (!IsMainSpeaker(speakerId) || text.Length > 20000) return;
             var previous = state;
             var next = previous;
+            var at=observedAt??DateTimeOffset.UtcNow;
             // Quoted dialogue belongs to its quoted speaker, even when pasted by the user.
             var directText = Quoted.Replace(text, " ");
             foreach (Match part in Sentences.Matches(directText))
@@ -113,6 +114,10 @@ public sealed class UserProfileStore
                 var name = ExtractName(instruction);
                 if (name is not null)
                     next = next with { PreferredName = name, NameSource = sentence[..Math.Min(sentence.Length, 500)] };
+                var reduced=ReadInitiativePreference(instruction);
+                if(reduced is {} value&&(next.InitiativePreferenceAt is null||at>=next.InitiativePreferenceAt))
+                    next=next with {Preferences=next.Preferences with {ReducedInitiative=value},InitiativePreferenceAt=at,
+                        PreferenceSource=sentence[..Math.Min(sentence.Length,500)]};
                 var preferences = ReadPreferences(instruction, next.Preferences);
                 if (preferences != next.Preferences)
                     next = next with { Preferences = preferences, PreferenceSource = sentence[..Math.Min(sentence.Length, 500)] };
@@ -184,14 +189,20 @@ public sealed class UserProfileStore
         return name.Length <= 80 && MeaningfulFallback(name).Length > 0 ? name : null;
     }
 
+    private static bool? ReadInitiativePreference(string text)
+    {
+        if (Is(text, @"^(?:(?:тебе\s+)?не\s+(?:обязательно|нужно|надо|стоит)\s+комментировать\s+(?:каждое|все)|(?:поубавь|поубавить|уменьши|уменьшить|снизь|снизить|убавь|поумерь)\b.{0,70}(?:инициатив|активност)|(?:be|become)\s+less\s+(?:proactive|initiating)|reduce\s+(?:your\s+)?(?:initiative|proactivity)|don['’]t\s+comment\s+on\s+every|only\s+speak\s+when\s+you\s+have\s+something\s+to\s+say)"))
+            return true;
+        if (Is(text, @"^(?:(?:будь|стань|можешь\s+быть)\s+(?:более\s+)?инициатив|(?:проявляй|прояви)\s+больше\s+инициатив|(?:be|become)\s+more\s+proactive|(?:increase|restore)\s+(?:your\s+)?(?:initiative|proactivity))"))
+            return false;
+        return null;
+    }
+
+    private static bool Is(string input,string pattern)=>Regex.IsMatch(input,pattern,RegexOptions.IgnoreCase,TimeSpan.FromMilliseconds(100));
+
     private static CommunicationPreferences ReadPreferences(string text, CommunicationPreferences current)
     {
-        static bool Is(string input, string pattern) => Regex.IsMatch(input, pattern, RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
         var next = current;
-        if (Is(text, @"^(?:(?:тебе\s+)?не\s+(?:обязательно|нужно|надо|стоит)\s+комментировать\s+(?:каждое|все)|(?:поубавь|поубавить|уменьши|уменьшить|снизь|снизить|убавь|поумерь)\b.{0,70}(?:инициатив|активност)|(?:be|become)\s+less\s+(?:proactive|initiating)|reduce\s+(?:your\s+)?(?:initiative|proactivity)|don['’]t\s+comment\s+on\s+every|only\s+speak\s+when\s+you\s+have\s+something\s+to\s+say)"))
-            next = next with { ReducedInitiative = true };
-        if (Is(text, @"^(?:будь\s+(?:более\s+)?инициатив|можешь\s+быть\s+(?:более\s+)?инициатив|(?:be|become)\s+more\s+proactive|(?:increase|restore)\s+(?:your\s+)?(?:initiative|proactivity))"))
-            next = next with { ReducedInitiative = false };
         if (Is(text, @"^(?:будь\s+(?:более\s+)?(?:прям|откровенн|конкретн|кратк)|говори\s+(?:прямо|по\s+существу|конкретно|коротко)|be\s+(?:more\s+)?(?:direct|straightforward|concise)|speak\s+plainly|answer\s+directly)"))
             next = next with { PreferDirectSpeech = true };
         if (Is(text, @"^(?:не\s+(?:(?:стоит|нужно|надо)\s+)?(?:из\s+себя\s+)?(?:выдавливай|выдавливать|выжимай|выжимать)\b.{0,40}(?:слов|речь)|не\s+говори\s+(?:лишь\s+бы|ради)|говори\s+по\s+существу|(?:avoid|skip)\s+(?:the\s+)?(?:filler|small\s+talk)|don['’]t\s+(?:force|pad|fill|say\s+things\s+just)|only\s+speak\s+when\s+you\s+have\s+something\s+to\s+say)"))
@@ -243,6 +254,7 @@ public sealed class UserProfileStore
         public CommunicationPreferences Preferences { get; init; } = new();
         public string NameSource { get; init; } = "";
         public string PreferenceSource { get; init; } = "";
+        public DateTimeOffset? InitiativePreferenceAt { get; init; }
         public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
     }
 }

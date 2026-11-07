@@ -65,6 +65,18 @@ internal static class UserProfileTests
             await File.WriteAllTextAsync(Path.Combine(root,"data","memory","user-profile.json"),"{}");
             var incomplete=new UserProfileStore(root,"User");await incomplete.InitializeAsync();Check.Equal("Alex",incomplete.PreferredName);
         });
+        await suite.Case("a newer initiative preference survives replay of older dialogue",async root=>
+        {
+            var now=DateTimeOffset.UtcNow;
+            var profile=new UserProfileStore(root,"User");
+            await profile.InitializeAsync();
+            await profile.ObserveAsync("Be less proactive. Be direct.","user",observedAt:now.AddMinutes(-30));
+            await profile.ObserveAsync("Проявляй больше инициативы.","user",observedAt:now);
+            var reopened=new UserProfileStore(root,"User");
+            await reopened.InitializeAsync();
+            await reopened.ObserveAsync("Be less proactive. Be direct.","user",observedAt:now.AddMinutes(-30));
+            Check.True(!reopened.Preferences.ReducedInitiative&&reopened.Preferences.PreferDirectSpeech,"Old dialogue overrode the new tempo or lost directness.");
+        });
         await suite.Case("forget resets learned profile and recovery copies while cancelled observations leave committed facts intact",async root=>
         {
             var profile=new UserProfileStore(root,"User");await profile.InitializeAsync();await profile.ObserveAsync("Call me Vlad. Be direct.","user");

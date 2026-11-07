@@ -93,9 +93,9 @@ public sealed class ProactiveOptions
     public bool Enabled { get; set; } = true;
     public bool RequireFirstUserMessage { get; set; } = true;
     public int CheckSeconds { get; set; } = 5;
-    public int MinIntervalSeconds { get; set; } = 600;
-    public int MaxIntervalSeconds { get; set; } = 1800;
-    public int CooldownSeconds { get; set; } = 300;
+    public int MinIntervalSeconds { get; set; } = 240;
+    public int MaxIntervalSeconds { get; set; } = 720;
+    public int CooldownSeconds { get; set; } = 150;
     public int QuietStartHour { get; set; } = 0;
     public int QuietEndHour { get; set; } = 8;
     public bool TriggerOnWindowChange { get; set; } = false;
