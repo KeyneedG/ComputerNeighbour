@@ -7,7 +7,7 @@ using ComputerNeighbour.Tools;
 
 namespace ComputerNeighbour.Application;
 
-internal enum TurnIntent { Chat, Tool, Screen, ScreenFollowup, FileCapability, WebCapability, WebFollowup, MissingSearchTopic }
+internal enum TurnIntent { Chat, Tool, Screen, ScreenReaction, ScreenFollowup, FileCapability, WebCapability, WebFollowup, MissingSearchTopic }
 internal sealed record TurnPlan(TurnIntent Intent,ToolRequest? Tool=null);
 
 internal static class TurnPlanner
@@ -15,6 +15,8 @@ internal static class TurnPlanner
     private const RegexOptions IgnoreCase=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
     private static readonly Regex Definition=new(
         """^(?:what (?:is|does|do)|define|что (?:такое|значит|означает)|объясни)\s+(?:(?:the (?:word|term)|слово|термин)\s+)?["'«“]?(?<term>[\p{L}][\p{L}\d_-]{1,34}(?: +[\p{L}][\p{L}\d_-]{1,34}){0,2})["'»”]?(?:\s+(?:mean|in (?:internet )?slang|в (?:интернет-)?сленге|на сленге))*[?.!\s]*$""",IgnoreCase);
+    private static readonly Regex PhotoRequest=new(
+        @"^(?:(?:look at|take a look at|(?<report>describe)|what do you think (?:of|about)|how do you like)\s+(?:this|that|the)\s+(?:photo(?:graph)?|picture|image|shot)|(?:(?:посмотри|взгляни|глянь|(?<report>опиши|проанализируй))\s+(?:на\s+)?|(?:что (?:ты )?думаешь (?:о|об)|как тебе)\s+)(?:эт(?:а|у|о|ой|от|ом)\s+)?(?:фото\p{L}*|сним\p{L}*|кадр\p{L}*|картин\p{L}*|изображени\p{L}*))(?=\s*(?:[?!.,]|$|\b(?:on (?:my|the) screen|in detail|and|на экране|подробно|и)\b))",IgnoreCase);
 
     public static async Task<TurnPlan> PlanAsync(string input,string speaker,bool forceScreen,AppConfig config,
         IReadOnlyList<MemoryEntry> history,ITurnContextModel? model,CancellationToken ct)
@@ -48,6 +50,13 @@ internal static class TurnPlanner
                 if(DefinitionTerm(IntentRouter.CommandText(entry.Text,config.CharacterName)) is {} prior)
                     return TermSearch(prior,IsSlang(entry.Text));
             return new(TurnIntent.MissingSearchTopic);
+        }
+        var photo=PhotoRequest.Match(request);
+        if(photo.Success)
+        {
+            var requestsDetail=photo.Groups["report"].Success||Regex.IsMatch(request[photo.Length..],
+                @"\b(?:describe|list|read|count|what (?:colour|color|is written)|подробно|опиши|перечисли|прочти|что написано)\b",IgnoreCase);
+            return new(requestsDetail?TurnIntent.Screen:TurnIntent.ScreenReaction);
         }
         if(Regex.IsMatch(request,@"^(?:(?:tell me\s+)?what (?:am I (?:doing|working on)|is (?:on|happening on) (?:my |the )?(?:screen|desktop))|(?:tell me\s+)?what's (?:on my screen|happening on my (?:screen|desktop))|(?:скажи[,\s]+|сказать[,\s]+)?(?:чем я (?:сейчас )?занят\p{L}*|что я (?:сейчас )?делаю|что (?:сейчас )?(?:у меня )?на экране)|(?:look|peek|check)\s+(?:at\s+)?(?:my|the)\s+(?:screen|desktop)|(?:посмиотри|посмотри|взгляни|глянь|проверь)\s+(?:на\s+)?(?:мой\s+)?(?:экран|рабочий стол))\b",IgnoreCase))
             return new(TurnIntent.Screen);

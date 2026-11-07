@@ -61,8 +61,16 @@ internal static class FeatureModelSmoke
             {
                 config.Permissions.ScreenCapture=true;
                 engine.Paused=false;
+                await engine.RespondAsync("Scheduled opportunity. The diagnostic card is routine and expected.","environment",true,false,ct);
+                var aside=memory.Recent.Last(e=>e.Role=="assistant").Text;
+                Check.True(aside==summary||ReplyQuality.IsShortScreenReaction(aside,[summary]),"The autonomous look reported a screen inventory.");
+                Console.WriteLine(aside==summary?"PASS the unsolicited glance stayed quiet.":"PASS the unsolicited glance gave a short aside.");
                 await engine.RespondAsync("Tell me what color fills the view on my screen right now.","user",false,false,ct);
-                Check.True(memory.Recent.Last(e=>e.Role=="assistant").Text.Contains("red",StringComparison.OrdinalIgnoreCase),"The real vision model did not identify the color of the supplied test image.");
+                var factual=memory.Recent.Last(e=>e.Role=="assistant").Text;
+                Check.True(factual.Contains("red",StringComparison.OrdinalIgnoreCase),"The real vision model did not identify the color of the supplied test image.");
+                await engine.RespondAsync("Что думаешь об этой фотографии?","user",false,false,ct);
+                var reaction=memory.Recent.Last(e=>e.Role=="assistant").Text;
+                Check.True(ReplyQuality.IsShortScreenReaction(reaction,[factual])&&reaction.Contains("red",StringComparison.OrdinalIgnoreCase),"The visual opinion repeated the caption or missed the test image.");
                 await engine.RespondAsync("Так ты действительно видела мой экран?","user",false,false,ct);
                 Check.True(memory.Recent.Last(e=>e.Role=="assistant").Text.Contains("took a real screenshot"),"The verified vision result was lost on the next turn.");
                 Console.WriteLine("PASS real model vision with synthetic image and grounded follow-up.");

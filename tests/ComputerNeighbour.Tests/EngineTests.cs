@@ -115,6 +115,37 @@ internal static class EngineTests
             Check.True(f.Output.Lines.Last().Contains("haven't completed"),"A failed capture became verified evidence.");
             Check.Equal(0,model.Calls.Count);
         });
+        await suite.Case("a question about a visible photo gets an opinion using the character's own voice",async root=>
+        {
+            const string opinion="That window light makes the empty chair feel like it has its own agenda.";
+            var model=new ScriptedModel(opinion+" I'd keep that lighting.\n\nVisible details: a window, a chair, and a floor.");
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>[1,2,3]);
+            f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
+            await f.Engine.RespondAsync("Что думаешь об этой фотографии?","user",false,false,default);
+            var messages=model.Calls.Single().Messages;
+            Check.True(messages[0].Text.Contains("calm, curious fictional neighbour")&&messages[0].Text.Contains("Evolving habits and interests"),"Visual replies did not use the character's voice.");
+            Check.True(messages[0].Text.Contains("give your own take")&&messages.Last().Image is [1,2,3],"The opinion request was not grounded in the actual image.");
+            Check.True(f.Output.Lines.Last().EndsWith(opinion+" I'd keep that lighting."),"The visual reaction did not stop after the personal thought.");
+        });
+        await suite.Case("autonomous screen glances drop captions and repeated commentary while keeping a personal aside",async root=>
+        {
+            const string aside="That chair has the dramatic lighting of a villain about to explain their plan.";
+            var model=new ScriptedModel(Decision("The photo shows a chair beside a window.",memory:"Do not save this rejected caption."),
+                Decision(aside),Decision(aside));
+            byte capture=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>[1,2,++capture]);
+            f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;f.Config.Observation.ScreenIntervalSeconds=0;
+            await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
+            Check.Equal(0,f.Output.Lines.Count);
+            Check.Equal(0,f.Memory.Recent.Count);
+            var first=model.Calls[0].Messages;
+            Check.True(first[0].Text.Contains(@"""speak"":false")&&first.Last().Text.Contains("Start from silence")&&first.Last().Image is [1,2,1],"An autonomous glance asked for a caption or missed the screenshot.");
+            await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
+            await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
+            Check.Equal(1,f.Output.Lines.Count);
+            Check.True(f.Output.Lines.Single().EndsWith(aside),"The personal observation was filtered out.");
+            Check.Equal(1,f.Engine.UnansweredMessages);
+        });
         await suite.Case("reads live Notepad text for reported filename and reports actual file capability",async root=>
         {
             var open=new OpenDocuments(new("LIVE_UNSAVED_SENTINEL: purple trains.",null));
