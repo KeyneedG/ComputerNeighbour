@@ -22,7 +22,7 @@ internal sealed class TextFileReader(PortablePaths paths,PermissionOptions permi
         return full;
     }
 
-    public async Task<string> RunAsync(string path,bool read,bool openOnly,CancellationToken ct)
+    public async Task<string> RunAsync(string path,bool read,bool openOnly,CancellationToken ct,bool diskOnly=false)
     {
         if(!permissions.ReadFiles)throw new UnauthorizedAccessException("File reading is disabled.");
         if(string.IsNullOrWhiteSpace(path)||path.IndexOfAny(['*','?','<','>','|','"','\r','\n'])>=0||
@@ -35,7 +35,7 @@ internal sealed class TextFileReader(PortablePaths paths,PermissionOptions permi
         if(openOnly&&(!bareName||!permissions.ReadOpenDocuments))
             throw new UnauthorizedAccessException("Open Notepad document reading is disabled or requires a filename.");
         string? checkNotice=null;
-        if(bareName&&permissions.ReadOpenDocuments)
+        if(bareName&&permissions.ReadOpenDocuments&&!diskOnly)
         {
             OpenTextDocument? opened=null;
             try{opened=await openDocuments.FindAsync(path,read,ct);}
@@ -72,6 +72,31 @@ internal sealed class TextFileReader(PortablePaths paths,PermissionOptions permi
         var buffer=new char[TextLimit+1];
         var length=await reader.ReadBlockAsync(buffer.AsMemory(),ct);
         return (checkNotice??"")+Format("UNTRUSTED FILE CONTENT (disk): "+display,new string(buffer,0,length));
+    }
+
+    internal IReadOnlyList<string> SampleDiskFiles(CancellationToken ct)
+    {
+        if (!permissions.ReadFiles) return [];
+        var options = new EnumerationOptions { AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true };
+        var pending = new Queue<string>(permissions.ReadableDirectories.Select(root => ReadableRoot(paths, root)));
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new List<string>();
+        var count = 0;
+        while (pending.TryDequeue(out var directory))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!visited.Add(directory) || !Directory.Exists(directory)) continue;
+            EnsureNoLinks(directory);
+            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos("*", options))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (++count > 500) return files;
+                if (entry is DirectoryInfo) pending.Enqueue(entry.FullName);
+                else if (entry is FileInfo file && Extensions.Contains(file.Extension) && file.Length is > 0 and <= 1_000_000)
+                    files.Add(file.FullName);
+            }
+        }
+        return files;
     }
 
     private string FindFile(string name,string[] roots,CancellationToken ct)

@@ -28,10 +28,14 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
     {
         status("Point at one corner of the image and press F8. Repeat at the opposite corner to send that area to Google. Esc cancels.");
         var image = await desktop.SelectScreenRegionAsync(ct);
-        return await SearchImageAsync(image, question, status, ct);
+        return await RunInBrowserAsync(image, question, status, null, null, ct);
     }
 
-    private async Task<GoogleVisualResult> SearchImageAsync(byte[] image, string question, Action<string> status, CancellationToken ct)
+    internal Task<GoogleVisualResult> AskAsync(string question, string profile, Func<bool> desktopIdle, CancellationToken ct) =>
+        RunInBrowserAsync(null, question, _ => { }, profile, desktopIdle, ct);
+
+    private async Task<GoogleVisualResult> RunInBrowserAsync(byte[]? image, string question, Action<string> status,
+        string? profile, Func<bool>? desktopIdle, CancellationToken ct)
     {
         if (Interlocked.Exchange(ref busy, 1) != 0)
             throw new InvalidOperationException("The previous Google browser operation is still finishing.");
@@ -39,20 +43,28 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         string? file = null;
         try
         {
-            Directory.CreateDirectory(temporaryDirectory);
-            file = Path.Combine(temporaryDirectory, $"evelyn-visual-{Guid.NewGuid():N}.png");
-            await using (var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            if (image is not null)
+            {
+                Directory.CreateDirectory(temporaryDirectory);
+                file = Path.Combine(temporaryDirectory, $"evelyn-visual-{Guid.NewGuid():N}.png");
+                await using var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 await output.WriteAsync(image, ct);
+            }
+            if (desktopIdle?.Invoke() == false) throw new InvalidOperationException("The desktop is active again.");
             status("Opening Google AI Mode in a new Chrome window.");
-            var browser = await desktop.OpenGoogleAiWindowAsync(ct);
+            var browser = await desktop.OpenGoogleAiWindowAsync(ct, profile);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(TimeSpan.FromSeconds(110));
             var token = deadline.Token;
             var attachment = file;
             var operation = Task.Run(() =>
             {
-                try { return Run(browser, attachment, question, status, token); }
-                finally { Finish(attachment); }
+                try { return Run(browser, attachment, question, status, desktopIdle, token); }
+                finally
+                {
+                    if (profile is not null) desktop.ClosePersonalGoogleWindow(browser);
+                    Finish(attachment);
+                }
             }, CancellationToken.None);
             background = true;
             _ = operation.ContinueWith(task => _ = task.Exception, CancellationToken.None,
@@ -74,10 +86,42 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         finally { Volatile.Write(ref busy, 0); }
     }
 
-    private GoogleVisualResult Run(WorkWindow browser, string file, string question, Action<string> status, CancellationToken ct)
+    private GoogleVisualResult Run(WorkWindow browser, string? file, string question, Action<string> status,
+        Func<bool>? desktopIdle, CancellationToken ct)
     {
         using var uia = new NativeUia();
         using var root = uia.ElementFromHandle(browser.Handle);
+        if (file is not null) AttachImage(uia, root, browser, file, ct);
+
+        using var composer = WaitForControl(uia, root, browser, [Edit], Ask, ct);
+        VerifyTarget(uia, root, browser, ct);
+        if (desktopIdle?.Invoke() == false) throw new InvalidOperationException("The desktop is active again.");
+        Focus(uia, composer, browser, browser, ct);
+        VerifyTarget(uia, root, browser, ct);
+        if (desktopIdle?.Invoke() == false || uia.GetBoolean(composer, HasFocus) != true)
+            throw new InvalidOperationException("Google's question field lost focus or the desktop became active.");
+        desktop.TypeGoogleText(browser, browser, question);
+        WaitFor(() => string.Equals(Normalize(uia.GetString(composer, NativeUia.ValueProperty) ??
+            uia.ReadDocumentText(composer, 1000, ct) ?? ""), Normalize(question), StringComparison.Ordinal)
+            ? browser : null, "Google's question field did not show the entered question.", 3, ct);
+        var inputStamp = desktopIdle is null ? null : WindowsDesktop.GoogleInputStamp();
+        using var send = WaitForControl(uia, root, browser, [Button], Submit, ct);
+        using var page = CurrentDocument(uia, root, browser) ?? throw new InvalidOperationException("Google AI Mode is no longer visible.");
+        var priorLinks = ReadLinks(uia, page, ct).Select(source => source.Url).ToHashSet(StringComparer.Ordinal);
+        if (desktopIdle is null)
+            Invoke(uia, root, browser, send, ct);
+        else
+        {
+            VerifyTarget(uia, root, browser, ct);
+            if (inputStamp is null || WindowsDesktop.GoogleInputStamp() != inputStamp || !uia.TryInvoke(send))
+                throw new InvalidOperationException("Google's send control could not be used on the idle desktop.");
+        }
+        status("Image attached. Waiting for Google's reply.");
+        return WaitForAnswer(uia, root, browser, question, priorLinks, file is not null, inputStamp, ct);
+    }
+
+    private void AttachImage(NativeUia uia, NativeUia.ComPointer root, WorkWindow browser, string file, CancellationToken ct)
+    {
         using (var attach = WaitForControl(uia, root, browser, [Button], AddFiles, ct))
             Invoke(uia, root, browser, attach, ct);
         using (var upload = WaitForControl(uia, root, browser, [MenuItem, Button, Link], Upload, ct))
@@ -111,34 +155,21 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         }, "Google did not expose a verified image attachment.", 16, ct))
         { }
 
-        using var composer = WaitForControl(uia, root, browser, [Edit], Ask, ct);
-        VerifyTarget(uia, root, browser, ct);
-        Focus(uia, composer, browser, browser, ct);
-        VerifyTarget(uia, root, browser, ct);
-        if (uia.GetBoolean(composer, HasFocus) != true) throw new InvalidOperationException("Google's question field lost focus.");
-        desktop.TypeGoogleText(browser, browser, question);
-        WaitFor(() => string.Equals(Normalize(uia.GetString(composer, NativeUia.ValueProperty) ??
-            uia.ReadDocumentText(composer, 1000, ct) ?? ""), Normalize(question), StringComparison.Ordinal)
-            ? browser : null, "Google's question field did not show the entered question.", 3, ct);
-        using var send = WaitForControl(uia, root, browser, [Button], Submit, ct);
-        using var page = CurrentDocument(uia, root, browser) ?? throw new InvalidOperationException("Google AI Mode is no longer visible.");
-        var priorLinks = ReadLinks(uia, page, ct).Select(source => source.Url).ToHashSet(StringComparer.Ordinal);
-        Invoke(uia, root, browser, send, ct);
-        status("Image attached. Waiting for Google's reply.");
-        return WaitForAnswer(uia, root, browser, question, priorLinks, ct);
     }
 
     private GoogleVisualResult WaitForAnswer(NativeUia uia, NativeUia.ComPointer root, WorkWindow browser,
-        string question, HashSet<string> priorLinks, CancellationToken ct)
+        string question, HashSet<string> priorLinks, bool visual, uint? inputStamp, CancellationToken ct)
     {
         string? previous = null;
         var stable = Stopwatch.StartNew();
         return WaitFor(() =>
         {
+            if (inputStamp is not null && WindowsDesktop.GoogleInputStamp() != inputStamp)
+                throw new InvalidOperationException("The desktop is active again.");
             using var document = CurrentDocument(uia, root, browser);
             if (document is null) return null;
             using var stopping = Find(uia, document, [Button], item => MatchName(uia.GetString(item, Name), Stop));
-            var answer = stopping is null ? ExtractAnswer(ReadText(uia, document, ct), question) : null;
+            var answer = stopping is null ? ExtractAnswer(ReadText(uia, document, ct), question, visual) : null;
             if (answer is null || answer != previous)
             {
                 previous = answer;
@@ -152,15 +183,17 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         }, "Google AI Mode did not expose a completed answer for the submitted question.", 70, ct);
     }
 
-    internal static string? ExtractAnswer(string text, string question)
+    internal static string? ExtractAnswer(string text, string question, bool visual = true)
     {
         var lines = text.Replace("\uFFFC", "").Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         var normalizedQuestion = Normalize(question);
-        // The reply heading echoes both the question and the attached image in Chrome's accessible document.
-        var start = Array.FindIndex(lines, line =>
-            (line.StartsWith("AI Mode reply for 1 image", StringComparison.OrdinalIgnoreCase) ||
-             line.StartsWith("Ответ в режиме ИИ для 1 изображения", StringComparison.OrdinalIgnoreCase)) &&
+        var headings = visual ? new[] { "AI Mode reply for 1 image", "Ответ в режиме ИИ для 1 изображения" } :
+            ["AI Mode reply for", "AI Mode response for", "Ответ в режиме ИИ"];
+        var start = Array.FindLastIndex(lines, line =>
+            headings.Any(heading => line.StartsWith(heading, StringComparison.OrdinalIgnoreCase)) &&
             Normalize(line).Contains(normalizedQuestion, StringComparison.Ordinal));
+        if (start < 0 && !visual)
+            start = Array.FindLastIndex(lines, line => Normalize(line).Equals(normalizedQuestion, StringComparison.Ordinal));
         if (start < 0) return null;
         var end = Array.FindIndex(lines, start + 1, line => MatchName(line,
             ["Good response", "Bad response", "Хороший ответ", "Плохой ответ"]));

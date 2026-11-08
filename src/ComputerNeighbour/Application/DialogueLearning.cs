@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ComputerNeighbour.Configuration;
 using ComputerNeighbour.ConsoleInterface;
 using ComputerNeighbour.Inference;
@@ -25,14 +26,60 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
     private TrainingRun? running;
     private string? regularAdapter;
     private bool preview;
+    private ReplyChoice? choice;
+    private int exchangesSinceChoice;
+    private DateTimeOffset lastChoice;
 
     private string AdapterDirectory => config.Model.UseAbliterated ? AmadeusDirectory : DirectoryName;
     private string CandidateName => AdapterDirectory + "/candidate.gguf";
     private string ActiveName => AdapterDirectory + "/active.gguf";
     private string StagedName => AdapterDirectory + "/candidate.part";
     private string BaseName => config.Model.UseAbliterated ? "runtimes/lora/amadeus" : "runtimes/lora/base";
+    private string AutoFingerprint => AdapterDirectory + "/auto-batch.txt";
+    private string AutoApplyDisabled => AdapterDirectory + "/auto-apply.disabled";
 
     internal bool IsTraining => running is not null;
+    internal sealed record AutomaticBatch(List<DialogueExample> Examples, string Fingerprint);
+    private sealed record ReplyChoice(DialogueExample First, DialogueExample Second, DateTimeOffset Expires);
+
+    internal void DiscardChoice() => choice = null;
+    internal void CancelAutomaticTraining()
+    {
+        if (running is { Automatic: not null } run) run.Cancellation.Cancel();
+    }
+
+    internal static bool SuitableSample(string text) => text.Length is > 8 and <= 600 &&
+        !text.Contains("<|", StringComparison.Ordinal) && !text.Contains('<') && !text.Contains("://", StringComparison.Ordinal) &&
+        !text.Contains('@') && !text.Contains("```", StringComparison.Ordinal) && !text.Any(char.IsControl) &&
+        !Regex.IsMatch(text, @"[a-z]:[\\/]|\b(?:password|api[ -]?key|access token|social insurance number)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+
+    internal async Task<bool> TryChooseAsync(string input, CancellationToken ct)
+    {
+        if (choice is not { } pending || pending.Expires <= DateTimeOffset.UtcNow || input.Trim() is not ("1" or "2"))
+            return false;
+        await SaveExampleAsync(input.Trim() == "1" ? pending.First : pending.Second, ct);
+        choice = null;
+        return true;
+    }
+
+    internal async Task MaybeCompareAsync(CompanionEngine engine, bool requested, CancellationToken ct)
+    {
+        if (engine.IsIncognito || !requested && (!config.Autonomy.CompareReplies || !engine.AutonomyEnabled ||
+            engine.BackgroundDeferred(DateTimeOffset.UtcNow)) || engine.LastDialogueExample is not { } first ||
+            !SuitableSample(first.Prompt) || !SuitableSample(first.Reply) || IsTraining)
+            return;
+        if (!requested && (++exchangesSinceChoice < 12 || DateTimeOffset.UtcNow - lastChoice < TimeSpan.FromMinutes(45))) return;
+        exchangesSinceChoice = 0;
+        lastChoice = DateTimeOffset.UtcNow;
+        var approved = await ReadExamplesAsync(ct);
+        if (approved.Count >= MaxExamples && !approved.Any(item => item.Prompt == first.Prompt)) return;
+        var alternate = await engine.DraftAlternativeAsync(first, ct);
+        if (alternate is null || !SuitableSample(alternate) ||
+            ReplyQuality.Normalize(alternate) == ReplyQuality.Normalize(first.Reply)) return;
+        choice = new(first, first with { Reply = alternate }, DateTimeOffset.UtcNow.AddMinutes(5));
+        ui.Write($"[{config.CharacterName}] I tried saying it another way. Which reply do you like better?\n1. {first.Reply}\n2. {alternate}\nReply with 1 or 2.");
+    }
 
     internal async Task StartModelAsync(CancellationToken ct)
     {
@@ -72,6 +119,13 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
                 if (engine.LastDialogueExample is not { } example) throw new InvalidOperationException("Complete a regular text conversation turn first.");
                 if (command == "teach" && argument.Length == 0) throw new ArgumentException("Usage: /lora teach YOUR_PREFERRED_REPLY");
                 await SaveExampleAsync(command == "teach" ? example with { Reply = argument } : example, ct);
+                DiscardChoice();
+                break;
+            case "compare":
+                await MaybeCompareAsync(engine, requested: true, ct);
+                break;
+            case "choose":
+                if (!await TryChooseAsync(argument, ct)) ui.Write("[LoRA] There is no current comparison. Use /lora compare after a dialogue reply.");
                 break;
             case "examples":
                 var examples = await ReadExamplesAsync(ct);
@@ -95,9 +149,12 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
                 break;
             case "apply":
                 await ApplyAsync(ct);
+                File.Delete(paths.Inside(AutoApplyDisabled));
                 break;
             case "off":
                 await DisableAsync(ct);
+                Directory.CreateDirectory(paths.Inside(AdapterDirectory));
+                await File.WriteAllTextAsync(paths.Inside(AutoApplyDisabled), "", ct);
                 ui.Write("[LoRA] Base model active.");
                 break;
             case "preview":
@@ -108,17 +165,20 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
                 break;
             case "clear" when argument == "CONFIRM":
                 await ClearAsync(ct);
+                await engine.ClearExercisesAsync(ct);
                 ui.Write("[LoRA] Examples and trained adapters cleared.");
                 break;
             case "status":
                 var count = (await ReadExamplesAsync(ct)).Count;
-                ui.Write($"[LoRA] {count}/{MaxExamples} approved examples. Training: {(IsTraining ? "running" : "idle")}. " +
+                ui.Write($"[LoRA] {count}/{MaxExamples} approved examples; {engine.PracticeExamples.Count} self-practice examples. Training: {(IsTraining ? "running" : "idle")}. " +
                     $"Candidate: {(File.Exists(paths.Inside(CandidateName)) ? "ready" : "none")}. Active: {(preview ? "incognito preview" : regularAdapter is null ? "base model" : "trained adapter")}.");
                 break;
             default:
                 ui.Write("""
                     /lora good              Approve the last ordinary dialogue reply
                     /lora teach REPLY       Save your preferred reply to that message
+                    /lora compare          Offer two replies to your last dialogue message
+                    /lora choose 1|2       Save only the selected reply
                     /lora examples          Inspect saved training examples
                     /lora remove NUMBER     Exclude an example from future training
                     /lora train             Train a candidate locally from 4–32 approved examples
@@ -203,22 +263,37 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
     private async Task ApplyAsync(CancellationToken ct)
     {
         var candidate = await GetCandidateAsync(ct);
+        await ActivateAsync(candidate, probe: false, ct);
+        ui.Write("[LoRA] Candidate enabled for your ordinary dialogue. /lora off returns to the base model.");
+    }
+
+    private async Task ActivateAsync(string candidate, bool probe, CancellationToken ct)
+    {
         var active = paths.Inside(ActiveName);
         var temporary = paths.Inside(ActiveName + ".tmp");
         await model.ReloadAsync(candidate, false, ct);
         try
         {
+            if (probe)
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                deadline.CancelAfter(TimeSpan.FromSeconds(25));
+                var reply = await model.CompletePersonalDialogueAsync(
+                    [new("system", $"You are {config.CharacterName}, a desktop companion. Give a natural, concise reply in English."),
+                    new("user", "I finally figured out what made my first draft so flat.")], GenerationPurpose.Dialogue, deadline.Token);
+                if (!SuitableSample(reply.Trim()) || ReplyQuality.ClaimsComputerAction(reply) || ReplyQuality.IsEmptyOffer(reply))
+                    throw new InvalidDataException("The candidate failed the dialogue check.");
+            }
             File.Copy(candidate, temporary, true);
             File.Move(temporary, active, true);
             regularAdapter = active;
         }
-        catch
+        catch when (!ct.IsCancellationRequested)
         {
             await model.ReloadAsync(regularAdapter, false, ct);
             throw;
         }
         finally { File.Delete(temporary); }
-        ui.Write("[LoRA] Candidate enabled for your ordinary dialogue. /lora off returns to the base model.");
     }
 
     private async Task DisableAsync(CancellationToken ct, bool restoreDevice = false)
@@ -247,27 +322,58 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
         RequireIdle();
         var examples = await ReadExamplesAsync(ct);
         if (examples.Count < 4) throw new InvalidOperationException("Save at least four different exchanges using /lora good or /lora teach.");
+        await StartTrainingAsync(examples, null, signal, ct, ct);
+    }
+
+    private IEnumerable<string> TrainingFiles()
+    {
         var shards = config.Model.UseAbliterated
             ? new[] { "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "model-mtp.safetensors" }
             : new[] { "model.safetensors-00001-of-00002.safetensors", "model.safetensors-00002-of-00002.safetensors" };
         var baseFiles = new[] { "config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "model.safetensors.index.json" }.Concat(shards);
-        foreach (var name in baseFiles.Select(file => BaseName + "/" + file).Concat([PythonName, ScriptName]))
+        return baseFiles.Select(file => BaseName + "/" + file).Concat([PythonName, ScriptName]);
+    }
+
+    internal async Task<AutomaticBatch?> GetAutomaticBatchAsync(IReadOnlyList<DialogueExample> practice, CancellationToken ct)
+    {
+        if (IsTraining || !config.Model.AutoStart || practice.Count == 0 && !File.Exists(paths.Inside(ExamplesName)) ||
+            TrainingFiles().Any(name => !File.Exists(paths.Inside(name)))) return null;
+        var approved = await ReadExamplesAsync(ct);
+        var examples = approved.Concat(practice).DistinctBy(item => item.Prompt).Take(MaxExamples).ToList();
+        if (examples.Count < 4) return null;
+        var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(examples, AppConfig.Json)));
+        var file = paths.Inside(AutoFingerprint);
+        if (File.Exists(file) && (await File.ReadAllTextAsync(file, ct)).Trim() == fingerprint) return null;
+        return new(examples, fingerprint);
+    }
+
+    internal Task StartAutomaticTrainingAsync(AutomaticBatch batch, Func<CancellationToken, ValueTask> signal,
+        CancellationToken preparation, CancellationToken shutdown) =>
+        StartTrainingAsync(batch.Examples, batch, signal, preparation, shutdown);
+
+    private async Task StartTrainingAsync(List<DialogueExample> examples, AutomaticBatch? automatic,
+        Func<CancellationToken, ValueTask> signal, CancellationToken preparation, CancellationToken shutdown)
+    {
+        RequireIdle();
+        foreach (var name in TrainingFiles())
             if (!File.Exists(paths.Inside(name))) throw new FileNotFoundException("LoRA dependencies are missing. Run Setup.cmd -Only LoRA" +
                 (config.Model.UseAbliterated ? " -Abliterated." : "."));
-        await VerifyBaseAsync(ct);
+        await VerifyBaseAsync(preparation);
+        preparation.ThrowIfCancellationRequested();
         Directory.CreateDirectory(paths.Inside(AdapterDirectory));
         var staged = paths.Inside(StagedName);
         File.Delete(staged);
         ui.Write("[LoRA] Moving dialogue to the CPU while the GPU trains. Replies may be slower.");
-        await model.ReloadAsync(regularAdapter, true, ct);
-        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        // A device change must finish once started, so user input never strands the server halfway through a reload.
+        await model.ReloadAsync(regularAdapter, true, shutdown);
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
         cancellation.CancelAfter(TimeSpan.FromMinutes(20));
-        var work = RunTrainerAsync(examples, staged, cancellation.Token);
-        running = new(cancellation, work);
-        _ = SignalWhenDoneAsync(work, signal, ct);
+        var work = RunTrainerAsync(examples, staged, automatic is not null, cancellation.Token);
+        running = new(cancellation, work, automatic);
+        _ = SignalWhenDoneAsync(work, signal, shutdown);
     }
 
-    private async Task RunTrainerAsync(List<DialogueExample> examples, string staged, CancellationToken ct)
+    private async Task RunTrainerAsync(List<DialogueExample> examples, string staged, bool validate, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var start = new ProcessStartInfo(paths.Inside(PythonName))
@@ -278,6 +384,7 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
         };
         foreach (var arg in new[] { "-B", "-u", paths.Inside(ScriptName), "--base", paths.Inside(BaseName), "--output", staged })
             start.ArgumentList.Add(arg);
+        if (validate) start.ArgumentList.Add("--validate");
         start.Environment["PYTHONUTF8"] = "1";
         start.Environment["HF_HUB_OFFLINE"] = "1";
         start.Environment["HF_HUB_DISABLE_TELEMETRY"] = "1";
@@ -323,15 +430,31 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
         try { await signal(ct); } catch (OperationCanceledException) { }
     }
 
-    internal async Task FinishTrainingAsync(CancellationToken ct)
+    internal async Task<string?> FinishTrainingAsync(CancellationToken ct)
     {
-        if (running is not { Work.IsCompleted: true } run) return;
+        if (running is not { Work.IsCompleted: true } run) return null;
+        string? completed = null;
+        var activated = false;
         try
         {
             await run.Work;
             run.Cancellation.Token.ThrowIfCancellationRequested();
-            File.Move(paths.Inside(StagedName), paths.Inside(CandidateName), true);
-            ui.Write("[LoRA] Candidate ready. Try it in incognito with /lora preview or enable it with /lora apply.");
+            var candidate = paths.Inside(CandidateName);
+            File.Move(paths.Inside(StagedName), candidate, true);
+            if (run.Automatic is { } automatic)
+            {
+                var apply = config.Autonomy.ApplyLora && !File.Exists(paths.Inside(AutoApplyDisabled));
+                if (apply)
+                {
+                    await ActivateAsync(candidate, probe: true, ct);
+                    activated = true;
+                }
+                await File.WriteAllTextAsync(paths.Inside(AutoFingerprint), automatic.Fingerprint, ct);
+                completed = apply ? "I practised some dialogue, checked the new voice adapter, and started using it."
+                    : "I practised some dialogue and saved a new voice adapter after it passed the training checks.";
+                ui.Write("[LoRA] " + completed);
+            }
+            else ui.Write("[LoRA] Candidate ready. Try it in incognito with /lora preview or enable it with /lora apply.");
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { ui.Write("[LoRA] Training cancelled or timed out."); }
         catch (Exception ex) when (!ct.IsCancellationRequested) { ui.Write("[LoRA] Training failed. " + ex.Message); }
@@ -341,7 +464,8 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
             running = null;
             DeleteStaged();
         }
-        await model.ReloadAsync(regularAdapter, false, ct);
+        if (!activated) await model.ReloadAsync(regularAdapter, false, ct);
+        return completed;
     }
 
     private void DeleteStaged()
@@ -353,6 +477,7 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
 
     internal async Task ClearAsync(CancellationToken ct)
     {
+        DiscardChoice();
         if (!Directory.Exists(paths.Inside(DirectoryName))) return;
         var wasTraining = IsTraining;
         await DisposeAsync();
@@ -362,7 +487,7 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
         foreach (var directory in new[] { DirectoryName, AmadeusDirectory })
         {
             if (!Directory.Exists(paths.Inside(directory))) continue;
-            foreach (var file in new[] { "active.gguf", "active.gguf.tmp", "candidate.gguf", "candidate.part" })
+            foreach (var file in new[] { "active.gguf", "active.gguf.tmp", "candidate.gguf", "candidate.part", "auto-batch.txt", "auto-apply.disabled" })
                 File.Delete(paths.Inside(directory + "/" + file));
         }
     }
@@ -377,5 +502,5 @@ internal sealed class DialogueLearning(PortablePaths paths, AppConfig config, Lo
         DeleteStaged();
     }
 
-    private sealed record TrainingRun(CancellationTokenSource Cancellation, Task Work);
+    private sealed record TrainingRun(CancellationTokenSource Cancellation, Task Work, AutomaticBatch? Automatic);
 }

@@ -40,6 +40,7 @@ public sealed partial class CompanionEngine
         internal string? ScopedSearchQuery { get; set; }
         internal int CompletionRetries { get; set; }
         internal SavedSketch? Sketch { get; set; }
+        internal ToolRequest? LastAttempt { get; set; }
         internal required FileWorkspace Workspace { get; init; }
         internal string? DestinationDirectory { get; init; }
         internal string? EditorRevisionText { get; init; }
@@ -587,6 +588,7 @@ public sealed partial class CompanionEngine
     private async Task PerformWorkActionAsync(WorkRun run, ToolRequest action, CancellationToken ct, PendingAction? approved = null)
     {
         ct.ThrowIfCancellationRequested();
+        run.LastAttempt = action;
         ToolResult result;
         try
         {
@@ -815,6 +817,9 @@ public sealed partial class CompanionEngine
         if (citations.Length > 0) reply = SourceHistory.AddVerifiedLinks(reply, citations);
         if (run.Sketch?.Description is {} description) reply += " " + description;
         await DeliverReplyAsync(reply, false, ct);
+        if (run.Results.LastOrDefault() is { Success: false } failure && run.LastAttempt is { } lastAttempt &&
+            failure.Tool == lastAttempt.Tool && WorkRequest.PermitsWebLookup(run.Request.Goal))
+            await RememberFailedTaskAsync(lastAttempt, run.Speaker, ct);
     }
 
     private static bool IsWorkInput(string tool) => tool is "click" or "type_text" or "press_key" or "scroll";

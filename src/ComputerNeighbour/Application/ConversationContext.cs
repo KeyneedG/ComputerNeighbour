@@ -105,6 +105,9 @@ public static class ReplyQuality
             ||Regex.IsMatch(answer,@"(?:^|[.!?]\s+)(?:(?:that|this|it) (?:looks|appears)|(?:the|your) (?:preview|render|image|photo|lighting|shadows?|skin tones?) (?:looks?|appears?|is|are))\s+(?:(?:a bit|a little|much|slightly|noticeably)\s+)?(?:lighter|darker|brighter|dimmer|sharper|blurrier|softer|clearer)\b[^.!?\r\n]{0,100}\b(?:now|this time)\b",RegexOptions.IgnoreCase);
     }
 
+    internal static bool MentionsDesktopView(string answer)=>Regex.IsMatch(answer,
+        @"\b(?:your|the|same|our) (?:screen|desktop)\b|\b(?:a|the|your|this) screenshot\b",RegexOptions.IgnoreCase);
+
     internal static bool ClaimsComputerAction(string answer)
     {
         const string firstPerson = @"\bI(?:['’]ll| will|['’]m(?: going to)?| am(?: going to)?)\s+(?:(?:now|just|currently|go ahead and|start)\s+)*";
@@ -142,6 +145,7 @@ public static class ReplyQuality
     {
         var normalized=Normalize(text);
         return normalized.Length<300&&Regex.IsMatch(normalized,@"\bi can (?:tell|share|explain|talk)\b.*\b(?:if you|would you|interested|like to)\b")
+            ||Regex.IsMatch(normalized,@"^(?:(?:okay|ok|all right|sure|well) )?(?:let s|let me|i ll|i will) (?:(?:take|have) (?:a )?(?:closer |quick )?look|look|check|inspect)(?: (?:at |into )?(?:this|that|it|the screen|your screen|the image))?$")
             ||normalized is "certainly" or "of course" or "sure";
     }
 }

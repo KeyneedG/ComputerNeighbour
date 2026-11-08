@@ -20,6 +20,7 @@ internal static class TestRunner
         var suite = new Suite(runRoot);
         await MemoryTests.RunAsync(suite);
         await BehaviorTests.RunAsync(suite);
+        await AutonomyTests.RunAsync(suite);
         await IntentRouterTests.RunAsync(suite);
         await EngineTests.RunAsync(suite);
         await FileWorkspaceTests.RunAsync(suite);

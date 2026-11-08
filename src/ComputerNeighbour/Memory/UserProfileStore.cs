@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using ComputerNeighbour.Configuration;
+using ComputerNeighbour.Tools;
 
 namespace ComputerNeighbour.Memory;
 
@@ -66,6 +67,11 @@ public sealed class UserProfileStore
     /// <summary>Empty means not known. The internal speaker label "user" is never presented as a person's name.</summary>
     public string PreferredName => Volatile.Read(ref state).PreferredName;
     public CommunicationPreferences Preferences => Volatile.Read(ref state).Preferences;
+    internal bool? InitiativeRequestedAt(DateTimeOffset at)
+    {
+        var current = Volatile.Read(ref state);
+        return current.InitiativePreferenceAt == at ? current.Preferences.ReducedInitiative : null;
+    }
     public string? RecoveryNotice { get; private set; }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -127,7 +133,7 @@ public sealed class UserProfileStore
                 var name = ExtractName(instruction);
                 if (name is not null)
                     next = next with { PreferredName = name, NameSource = sentence[..Math.Min(sentence.Length, 500)] };
-                var reduced=ReadInitiativePreference(instruction);
+                var reduced=ReadInitiativePreference(IntentRouter.CommandText(instruction));
                 if(reduced is {} value&&(next.InitiativePreferenceAt is null||at>=next.InitiativePreferenceAt))
                     next=next with {Preferences=next.Preferences with {ReducedInitiative=value},InitiativePreferenceAt=at,
                         PreferenceSource=sentence[..Math.Min(sentence.Length,500)]};
@@ -205,6 +211,10 @@ public sealed class UserProfileStore
 
     private static bool? ReadInitiativePreference(string text)
     {
+        if (Is(text, @"^(?:(?:можешь\s+)?(?:немного\s+)?(?:приубавь|приубавить|поубавь|поубавить|убавь|умерь|поумерь)\s+(?:(?:свой|немного)\s+)*пыл\b|(?:отложи|приостанови)\s+(?:свою\s+)?(?:текущую\s+|фоновую\s+)(?:цель|задачу|работу)\b|(?:can you\s+)?(?:slow down|dial it back|take it easy)\b[.!?\s]*$|(?:pause|put off)\s+(?:your\s+)?(?:current\s+|background\s+)(?:goal|activity|work)\b)"))
+            return true;
+        if (Is(text, @"^(?:возобнови\s+(?:свою\s+)?фоновую\s+(?:работу|задачу)|resume\s+(?:your\s+)?background\s+(?:work|activity))\b"))
+            return false;
         if (Is(text, @"^(?:(?:тебе\s+)?не\s+(?:обязательно|нужно|надо|стоит)\s+комментировать\s+(?:каждое|все)|(?:поубавь|поубавить|уменьши|уменьшить|снизь|снизить|убавь|поумерь)\b.{0,70}(?:инициатив|активност)|(?:be|become)\s+less\s+(?:proactive|initiating)|reduce\s+(?:your\s+)?(?:initiative|proactivity)|don['’]t\s+comment\s+on\s+every|only\s+speak\s+when\s+you\s+have\s+something\s+to\s+say)"))
             return true;
         if (Is(text, @"^(?:(?:будь|стань|можешь\s+быть)\s+(?:более\s+)?инициатив|(?:проявляй|прояви)\s+больше\s+инициатив|(?:be|become)\s+more\s+proactive|(?:increase|restore)\s+(?:your\s+)?(?:initiative|proactivity))"))

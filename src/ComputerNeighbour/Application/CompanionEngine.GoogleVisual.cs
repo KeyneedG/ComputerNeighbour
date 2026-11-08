@@ -11,7 +11,7 @@ namespace ComputerNeighbour.Application;
 
 public sealed partial class CompanionEngine
 {
-    private IGoogleVisualSearch? googleVisualSearch;
+    private GoogleAiMode? googleVisualSearch;
     internal IGoogleVisualSearch? GoogleVisualSearchOverride { get; init; }
     private static readonly Regex NoImageUpload = new(
         @"\b(?:(?:do not|don['’]t|never)\s+(?:upload|send|share|attach)|without\s+(?:uploading|sending|sharing|attaching))\b|\bне\s+(?:загружай|отправляй|передавай|прикрепляй|выкладывай)\b",

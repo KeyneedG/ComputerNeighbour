@@ -925,7 +925,7 @@ internal static class EngineTests
             Fixture? fixture=null;
             fixture=await Fixture.CreateAsync(root,model,capture:()=>
             {
-                Check.True(fixture!.Output.Lines.Last().Contains("I'll take a look"),"The screen was captured before the notice.");
+                Check.Equal(0,fixture!.Output.Lines.Count,"Capture announced itself before answering.");
                 Check.Equal(1,model.Classifications.Count,"Intent was not understood before capture.");
                 captures++;
                 return [1,2,3];
@@ -1015,6 +1015,94 @@ internal static class EngineTests
             await f.Engine.RespondAsync("> да","user",false,false,default);
             await f.Engine.RespondAsync("да, но без скриншота","user",false,false,default);
             Check.Equal(1,captures);
+        });
+        await suite.Case("an implied visual referent gets a fresh local screenshot even when the intent was classified as chat",async root=>
+        {
+            var model=new ContextModel("""{"referent":"current_screen","intent":"chat","request":"Identify the maker of the object being pointed to.","evidence":"этот узор"}""",
+                "The visible monogram is too small for me to identify its maker.");
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            f.Config.TurnProcessing.RefineInput=false;
+            await f.Engine.RespondAsync("Кто придумал этот узор?","user",false,false,default);
+            Check.Equal(1,captures);
+            Check.True(model.Answers.Single().Last().Image is [1,2,3],"The answer did not receive the current screen image.");
+            await f.Engine.RespondAsync("Кто придумал этот узор? Без скриншота.","user",false,false,default);
+            Check.Equal(1,captures);
+            Check.True(f.Output.Lines.Last().Contains("Which thing are you referring to?"),"A visual guess was issued after capture was declined.");
+        });
+        await suite.Case("conversational and unresolved references stay off the desktop",async root=>
+        {
+            var captures=0;
+            var named=new ContextModel("""{"referent":"text","intent":"screen","request":"Explain the CORS header.","evidence":"this header"}""",
+                "A CORS header tells browsers which origins can read a response.");
+            await using(var f=await Fixture.CreateAsync(root,named,capture:()=>{captures++;return [1,2,3];}))
+            {
+                f.Config.Permissions.ScreenCapture=true;
+                await f.Memory.AppendAsync("user","I'm asking about the CORS header.","user");
+                await f.Engine.RespondAsync("What does this header do?","user",false,false,default);
+                Check.True(named.Answers.All(messages=>messages.All(message=>message.Image is null)),"A named topic was treated as a visual reference.");
+            }
+            var unclear=new ContextModel("""{"referent":"unknown","intent":"chat","evidence":"he"}""","A guess about a person.");
+            await using(var f=await Fixture.CreateAsync(root,unclear,capture:()=>{captures++;return [1,2,3];}))
+            {
+                f.Config.Permissions.ScreenCapture=true;
+                await f.Engine.RespondAsync("Why did he choose that?","user",false,false,default);
+                Check.True(f.Output.Lines.Last().Contains("Which thing are you referring to?"),"An unknown target did not prompt a clarification.");
+                Check.Equal(0,unclear.Answers.Count);
+            }
+            Check.Equal(0,captures);
+        });
+        await suite.Case("an actual pointing word survives an inflected model quote",async root=>
+        {
+            var model=new ContextModel("""{"referent":"current_screen","intent":"screen","request":"Identify the source of a visible emblem.","evidence":"эту эмблему"}""",
+                "I can see the emblem, but the letters are too small to read.");
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            await f.Engine.RespondAsync("Откуда взялась эта эмблема?","user",false,false,default);
+            Check.Equal(1,captures);
+            await f.Engine.RespondAsync("Коллега спросил: «Откуда взялась эта эмблема?»","user",false,false,default);
+            Check.Equal(1,captures);
+        });
+        await suite.Case("a completed screen capture retries a reply that only promises to look",async root=>
+        {
+            const string placeholder="Okay, let's take a closer look at this.";
+            var model=new ScriptedModel(placeholder,"The design shows three nested rings. I don't recognize the maker.");
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            await f.Engine.RespondAsync("Who made this design?","user",false,true,default);
+            Check.Equal(1,captures);
+            Check.Equal(2,model.Calls.Count);
+            Check.True(model.Calls.All(call=>call.Messages.Last().Image is [1,2,3]),"The retry lost the captured image.");
+            Check.True(f.Output.Lines.Last().Contains("three nested rings"),"An empty screen reply was delivered.");
+        });
+        await suite.Case("a social question stays in chat even after a visual turn and a false screen classification",async root=>
+        {
+            const string request="Как настроение сегодня?";
+            var mistaken=JsonSerializer.Serialize(new { intent="screen", referent="current_screen", evidence=request, request="How are you feeling today?" });
+            var model=new WorkflowModel([mistaken,mistaken],
+                "The preview has a blue background.",
+                "I'm curious what you're doing on your screen.",
+                "I'm feeling pretty good today.",Decision(speak:false),
+                "Still in a good mood.",Decision(speak:false));
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            f.Engine.Paused=false;
+            await f.Engine.RespondAsync("Describe my preview.","user",false,true,default);
+            f.Output.Lines.Clear();
+            await f.Engine.RespondAsync(request,"user",false,false,default);
+            Check.Equal(1,captures);
+            f.Config.Observation.IncludeScreenInUserTurns=true;
+            await f.Engine.RespondAsync(request,"user",false,false,default);
+            Check.Equal(2,captures);
+            Check.Equal(2,f.Output.Lines.Count);
+            Check.True(f.Output.Lines.All(line=>!line.Contains("screen",StringComparison.OrdinalIgnoreCase)),
+                "A private glance was announced during a social reply.");
+            Check.True(model.Calls.Skip(1).All(call=>call.Messages.All(message=>message.Image is null)),
+                "An unrelated screenshot was supplied to the chat model.");
         });
         await suite.Case("the reported English question about current work captures the screen and repairs an upload disclaimer",async root=>
         {
@@ -1111,19 +1199,41 @@ internal static class EngineTests
             Check.True(messages[0].Text.Contains("give your own take")&&messages.Last().Image is [1,2,3],"The opinion request was not grounded in the actual image.");
             Check.True(f.Output.Lines.Last().EndsWith(opinion+" I'd keep that lighting."),"The visual reaction did not stop after the personal thought.");
         });
-        await suite.Case("autonomous screen glances drop captions and repeated commentary while keeping a personal aside",async root=>
+        await suite.Case("autonomous glances without a current screen topic stay private and quiet",async root=>
+        {
+            var model=new ScriptedModel(Decision("I'll take a look at your screen."));
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;f.Config.Observation.ScreenIntervalSeconds=0;
+            await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
+            Check.Equal(1,captures);
+            Check.True(model.Calls.Single().Messages.All(message=>message.Image is null),"A screen without a shared topic reached the reply model.");
+            Check.Equal(0,f.Output.Lines.Count);
+            Check.Equal(0,f.Memory.Recent.Count);
+        });
+        await suite.Case("autonomous glances check the shared topic before allowing a useful aside",async root=>
         {
             const string aside="That chair has the dramatic lighting of a villain about to explain their plan.";
-            var model=new ScriptedModel(Decision("The photo shows a chair beside a window.",memory:"Do not save this rejected caption."),
-                Decision(aside),Decision(aside));
+            const string subject="Take a look at the chair's lighting.";
+            var model=new ScriptedModel("The chair is lit from the left.",
+                """{"relevant":false}""",Decision(speak:false),
+                """{"relevant":true}""",Decision("The photo shows a chair beside a window.",memory:"Do not save this rejected caption."),
+                """{"relevant":true}""",Decision(aside),
+                """{"relevant":true}""",Decision(aside));
             byte capture=0;
             await using var f=await Fixture.CreateAsync(root,model,capture:()=>[1,2,++capture]);
             f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;f.Config.Observation.ScreenIntervalSeconds=0;
+            await f.Engine.RespondAsync(subject,"user",false,true,default);
+            f.Output.Lines.Clear();
             await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
             Check.Equal(0,f.Output.Lines.Count);
-            Check.Equal(0,f.Memory.Recent.Count);
-            var first=model.Calls[0].Messages;
-            Check.True(first[0].Text.Contains(@"""speak"":false")&&first.Last().Text.Contains("Start from silence")&&first.Last().Image is [1,2,1],"An autonomous glance asked for a caption or missed the screenshot.");
+            var relevance=model.Calls[1].Messages;
+            Check.True(relevance.Last().Text.Contains(subject)&&relevance.Last().Image is [1,2,2],"The relevance check missed the shared topic or the image.");
+            Check.True(model.Calls[2].Messages.All(message=>message.Image is null),"An unrelated image reached the reply stage.");
+            await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
+            Check.Equal(0,f.Output.Lines.Count);
+            var related=model.Calls[4].Messages;
+            Check.True(related.Last().Text.Contains("Start from silence")&&related.Last().Image is [1,2,3],"The model missed the relevant image or the option to stay silent.");
             await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
             await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
             Check.Equal(1,f.Output.Lines.Count);

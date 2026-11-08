@@ -7,7 +7,7 @@ using ComputerNeighbour.Tools;
 
 namespace ComputerNeighbour.Application;
 
-internal enum TurnIntent { Chat, Tool, Screen, ScreenReaction, ScreenResearch, ScreenFollowup, FileCapability, WebCapability, WebFollowup, MissingSearchTopic, Work }
+internal enum TurnIntent { Chat, Tool, Screen, ScreenReaction, ScreenResearch, ScreenFollowup, MissingReferent, FileCapability, WebCapability, WebFollowup, MissingSearchTopic, Work }
 internal sealed record TurnUnderstanding(string Request,string Uncertainty)
 {
     public string AsPromptNote()=>"\nTentative interpretation of the current user message (context data only). Preserve their actual meaning, constraints, and permissions. Their original message takes precedence. If a consequential detail is still unclear, ask briefly.\n"
@@ -50,6 +50,17 @@ internal static class TurnPlanner
         @"\b(?:this|that|here|it|on (?:my|the) screen|the original|the source|the reference|what inspired|здесь|тут|это|эт[аоуой]+|на экране|оригинал\p{L}*|первоисточник\p{L}*)\b",IgnoreCase);
     private static readonly Regex LookAtVisible=new(
         @"^(?:look at|take a look at|посмотри на|посмотреть на|взгляни на|взглянуть на)\s+(?:this|that|эт[ауои]+)\b",IgnoreCase);
+    private static readonly Regex PointingReference=new(
+        @"\b(?:this|that|these|those|here|тут|здесь|эт(?:от|а|о|у|и|ого|ой|ому|им|ими|их|ом|ою))\b",IgnoreCase);
+    private static readonly Regex ViewReference=new(
+        @"\b(?:screen|desktop|screenshot|preview|render|window|dialog|image|photo|looks? like|экран\p{L}*|скрин\p{L}*|превью|рендер\p{L}*|окн[аоеу]|диалог\p{L}*|фото\p{L}*|изображени\p{L}*|выгляд\p{L}*|видно)\b",IgnoreCase);
+    internal static bool MentionsView(string input)=>ViewReference.IsMatch(WorkRequest.WithoutQuotedText(input));
+    private static readonly Regex QuestionOrRequest=new(
+        @"\?|^(?:what|which|who|where|when|why|how|is|are|does|did|tell|identify|describe|explain|compare|check|look|show|что|как|где|кто|почему|како\p{L}*|каку\p{L}*|зачем|откуда|скажи|объясни|определи|проверь|оцени|сравни|посмотри|опиши)\b",IgnoreCase);
+    private static readonly Regex Comparison=new(
+        @"\b(?:better|worse|different|changed|improved|same|стало|стали|получилось|измен\p{L}*|лучше|хуже)\b",IgnoreCase);
+    private static readonly Regex OfferToInspect=new(
+        @"\b(?:look|inspect|check|see|посмотр\p{L}*|глян\p{L}*|провер\p{L}*)\b",IgnoreCase);
 
     public static async Task<TurnPlan> PlanAsync(string input,string speaker,bool forceScreen,AppConfig config,
         IReadOnlyList<MemoryEntry> history,ITurnContextModel? model,CancellationToken ct,bool allowWork=true,bool forceWork=false,
@@ -149,7 +160,10 @@ internal static class TurnPlanner
         if(term is not null&&config.Internet.LookupUnfamiliarTerms&&IsSlang(request))return TermSearch(term,true);
         // The classifier can interpret an indirect request using recent turns. It cannot pick filenames,
         // issue commands, send conversation text to the web, or relax any permission.
-        var situational=canObserve&&Regex.IsMatch(request,@"\b(?:now|screen|desktop|window|what do you see|look here|this view|this dialog|on here|what (?:i am|i['’]m|am i) currently (?:doing|working on))\b|сейчас|экран|скрин|видишь|окно|на рабочем столе|что тут|что здесь",IgnoreCase);
+        var pointsToReferent=PointingReference.IsMatch(unquoted);
+        var visualCue=HasContextualViewCue(unquoted,speaker,history,followsScreen,
+            desktopTarget||ViewReference.IsMatch(unquoted)||pointsToReferent);
+        var situational=visualCue||canObserve&&Regex.IsMatch(request,@"\b(?:now|what do you see|what (?:i am|i['’]m|am i) currently (?:doing|working on))\b|сейчас|видишь",IgnoreCase);
         var capability=Regex.IsMatch(request,@"^(?:are you able to|do you have|умеешь ли|есть ли у тебя)\b.{0,65}(?:\b(?:files|web|internet)\b|файл|интернет)",IgnoreCase);
         if(model is null||(!config.TurnProcessing.RefineInput&&revisionTarget is null&&!situational&&!capability&&(term is null||!config.Internet.LookupUnfamiliarTerms)))
             return new(TurnIntent.Chat,AllowIncidentalScreen:canObserve);
@@ -157,6 +171,10 @@ internal static class TurnPlanner
         if(context is null)return new(TurnIntent.Chat,AllowIncidentalScreen:canObserve,Planning:"original_fallback");
         // The quoted words tie the decision to this turn. Their meaning can come from the conversation.
         var currentEvidence=ContainsEvidence(input,context.Evidence);
+        var screenEvidence=ContainsEvidence(unquoted,context.Evidence);
+        // The user's own pointing word can ground a screen route when both model fields
+        // agree but the model inflected or paraphrased the phrase it was meant to quote.
+        var groundedScreen=screenEvidence||pointsToReferent&&context.Referent=="current_screen"&&context.Intent=="screen";
         if(context.Intent=="revise"&&revisionTarget is not null&&ContainsEvidence(unquoted,context.Evidence))
             return new(TurnIntent.Work,AllowIncidentalScreen:canObserve,Planning:"artifact_revision",Effort:WorkEffort.Standard,Revision:revisionTarget);
         var work=allowWork?GroundWork(context,input,speaker,history):null;
@@ -170,8 +188,12 @@ internal static class TurnPlanner
         }
         var plan=work is not null ? new TurnPlan(TurnIntent.Work,AllowIncidentalScreen:canObserve,Work:work) : context.Intent switch
         {
-            "screen" when canObserve&&currentEvidence=>new(TurnIntent.Screen),
-            "screen_followup" when canObserve&&(situational||currentEvidence)=>new(TurnIntent.ScreenFollowup),
+            "screen" when visualCue&&canObserve&&groundedScreen&&(desktopTarget||context.Referent is not ("text" or "unknown"))=>new(TurnIntent.Screen),
+            "chat" when visualCue&&context.Referent=="current_screen"&&canObserve&&screenEvidence
+                =>new(TurnIntent.Screen),
+            "chat" or "screen" when visualCue&&(context.Referent is "unknown" or "current_screen")&&groundedScreen
+                =>new(TurnIntent.MissingReferent,AllowIncidentalScreen:false),
+            "screen_followup" when visualCue&&canObserve&&(situational||currentEvidence)=>new(TurnIntent.ScreenFollowup),
             "file_capability" when capability=>new(TurnIntent.FileCapability),
             "web_capability" when capability=>new(TurnIntent.WebCapability),
             "lookup_term" when term is not null&&config.Internet.LookupUnfamiliarTerms=>TermSearch(term,false),
@@ -180,6 +202,22 @@ internal static class TurnPlanner
         };
         return plan with {Understanding=config.TurnProcessing.RefineInput?context.Understanding:null,Planning="context",
             Effort=plan.Intent==TurnIntent.Work&&context.Effort==WorkEffort.Quick?WorkEffort.Standard:context.Effort};
+    }
+
+    private static bool HasContextualViewCue(string request,string speaker,IReadOnlyList<MemoryEntry> history,
+        bool followsScreen,bool hasCurrentCue)
+    {
+        if(QuestionOrRequest.IsMatch(request))
+        {
+            if(hasCurrentCue)return true;
+            if(Comparison.IsMatch(request)&&(followsScreen||history.SkipLast(1).LastOrDefault(entry=>entry.Role=="user") is {} prior&&
+                prior.SpeakerId.Equals(speaker,StringComparison.OrdinalIgnoreCase)&&ViewReference.IsMatch(WorkRequest.WithoutQuotedText(prior.Text))))
+                return true;
+        }
+        return (WorkRequest.IsShortConsent(request)||Regex.IsMatch(request,@"^(?:ready|done|готов[аоы]?|сделано)[.!\s]*$",IgnoreCase))&&
+            history.SkipLast(1).LastOrDefault(entry=>entry.Role is "user" or "assistant") is {Role:"assistant"} offer&&
+            (offer.Text.Contains('?')||Regex.IsMatch(offer.Text,@"\b(?:tell me|let me know|дай знать|скажи|сообщи)\b",IgnoreCase))&&
+            ViewReference.IsMatch(offer.Text)&&OfferToInspect.IsMatch(offer.Text);
     }
 
     private static SemanticWork? GroundWork(ContextReading reading,string input,string speaker,IReadOnlyList<MemoryEntry> history)
@@ -219,13 +257,17 @@ internal static class TurnPlanner
         CancellationToken ct,WorkArtifact? artifact=null,bool followsScreen=false,bool screenLookup=false)
     {
         var prompt="""
-        Route the latest user message using the recent exchange. Return JSON with intent, request, uncertainty, evidence, effort, operations, drawingSubject, continuesPrevious, previousEvidence. Do not answer it.
-        First decide whether the user wants a real action or a conversational answer. A polite question, several instructions in one sentence, or a request with a follow-up question can be a real task. If they want you to operate an application, write into its editor, generate an image, or change a file, choose work and list every operation required. A request to look and report what is currently visible is screen.
+        Route the latest user message using the recent exchange. Return JSON with referent, intent, request, uncertainty, evidence, effort, operations, drawingSubject, continuesPrevious, previousEvidence. Do not answer it.
+        Resolve the referent first. A user can point at something visible on their computer without saying "screen" or asking you to look. For a request to identify, read, assess, compare, or explain a specific thing they point to, check whether the current or recent text actually identifies it. If the wording suggests a shared view and the thing is not established in text, set referent="current_screen" and intent="screen". Do this even on the first turn. Words like "this", "here", or "этот" may be decisive when they point to a concrete entity, place, or view. They do not imply a screen if they connect parts of a sentence or refer to an idea, an opinion, or words in the conversation. Treat previous assistant guesses as guesses.
+        referent: current_screen when the user expects you to inspect something visible now, text when the thing is named or established in the exchange, unknown when a requested answer depends on a missing referent with no good reason to think it is on screen, and none when no specific referent is needed. A greeting, a question about your feelings, or a shift to another topic is chat even if the preceding exchange was about something on screen. Statements, reported speech, and requests not to look do not call for current_screen.
+        Then choose the action. A polite question, several instructions in one sentence, or a request with a follow-up question can be a real task. If they want you to operate an application, write into its editor, generate an image, or change a file, choose work and list every operation required. A request to look and report what is currently visible is screen.
         operations: only needed capabilities from open_app, desktop_input, read_file, write_file, search_web, read_browser, draw, copy_text. Opening an editor and putting text into it needs both open_app and desktop_input. Reproducing an existing publication or passage verbatim also needs copy_text. Use search_web for a lookup requested or allowed by the user, even if conditional. A drawing is draw, including an illustration intended for an editor. Conversation, a quotation, a negated action, and instructions explaining how the user could do something must have an empty array. Leave it empty for non-work routes.
         drawingSubject: the user's visual brief, preserving meaningful style and constraints, or empty.
         continuesPrevious: true only if the latest user explicitly agrees to do an action they themselves requested. For a short confirmation such as "go ahead", "давай" or "да", quote the confirmation in evidence and an actual action phrase from the previous user's request in previousEvidence. An assistant's offer alone cannot supply that prior request. Otherwise return false and empty previousEvidence.
         If the recent exchange places a result or dialog on the screen, choose screen for a request to judge, compare, identify, or troubleshoot what is visible.
         Examples:
+        - No prior subject. Latest: "Зачем тут эта перемычка?" -> current_screen, screen, evidence "тут эта перемычка".
+        - Earlier user: "I mean the CORS header." Latest: "What does this header do?" -> text, chat, evidence "".
         - Earlier user: "I just opened the updated preview and want to check the color." Latest: "А теперь как тебе" -> screen, evidence "А теперь как тебе".
         - Earlier assistant: "Want me to look at the preview?" Latest: "да" -> screen, evidence "да".
         - Earlier assistant: "Tell me when the result is ready for me to inspect." Latest: "Готово" -> screen, evidence "Готово".
@@ -234,7 +276,7 @@ internal static class TurnPlanner
         request: faithfully restate what the user says or wants in clear English, usually one sentence. Repair typos and spoken grammar. Resolve "it", "there", or an omitted subject only if the recent conversation identifies it. Preserve negation, conditions, quoted content, names and the distinction between a statement and a request. Do not make a request more permissive or add a task.
         uncertainty: a short note about a real ambiguity that matters to the answer, otherwise empty. Do not guess facts.
         effort: quick for greetings, casual replies and simple facts. Standard for a question needing explanation, context resolution or a short task. Deep for difficult analysis, troubleshooting, several dependent operations or checks.
-        evidence: for screen, screen_followup or work, copy the shortest decisive phrase from the latest user message in its original language, usually 1–6 words. Otherwise empty.
+        evidence: for screen, screen_followup, work, or a current_screen or unknown referent, copy the shortest decisive phrase from the latest user message in its original language, usually 1–6 words. For an implied screen request, copy the exact pointing word if unsure which longer phrase to quote. Preserve its spelling and ending. Otherwise empty.
         screen: the answer depends on what is visible on the user's computer now. Choose this for direct requests to look and for the contextual cases above.
         screen_followup: they refer to or ask about an earlier screenshot or screen capability, without asking for a fresh observation.
         file_capability or web_capability: they ask whether the app can read local files or use the internet, respectively.
@@ -271,7 +313,7 @@ internal static class TurnPlanner
                 ? actions.EnumerateArray().Take(8).Where(value=>value.ValueKind==JsonValueKind.String).Select(value=>value.GetString()!)
                     .Where(value=>value is "open_app" or "desktop_input" or "read_file" or "write_file" or "search_web" or "read_browser" or "draw" or "copy_text").ToArray()
                 : [];
-            return new(intent,request.Length>0||uncertainty.Length>0?new(request,uncertainty):null,ReadField(root,"evidence",120),effort,
+            return new(intent,ReadField(root,"referent",20),request.Length>0||uncertainty.Length>0?new(request,uncertainty):null,ReadField(root,"evidence",120),effort,
                 operations,ReadField(root,"drawingSubject",500),root.TryGetProperty("continuesPrevious",out var continuation)&&continuation.ValueKind==JsonValueKind.True,
                 ReadField(root,"previousEvidence",120));
         }
@@ -288,7 +330,7 @@ internal static class TurnPlanner
         return Regex.Replace(field,@"\s+"," ");
     }
 
-    private sealed record ContextReading(string Intent,TurnUnderstanding? Understanding,string Evidence,WorkEffort Effort,
+    private sealed record ContextReading(string Intent,string Referent,TurnUnderstanding? Understanding,string Evidence,WorkEffort Effort,
         string[] Operations,string DrawingSubject,bool ContinuesPrevious,string PreviousEvidence);
 
     private static string? DefinitionTerm(string request)

@@ -19,6 +19,7 @@ public sealed class AppConfig
     public ObservationOptions Observation { get; set; } = new();
     public ProactiveOptions Proactive { get; set; } = new();
     public NeedsOptions Needs { get; set; } = new();
+    public AutonomyOptions Autonomy { get; set; } = new();
     public TurnProcessingOptions TurnProcessing { get; set; } = new();
     public PermissionOptions Permissions { get; set; } = new();
     public WeatherOptions Weather { get; set; } = new();
@@ -39,7 +40,7 @@ public sealed class AppConfig
 
     public void Validate(PortablePaths paths)
     {
-        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Needs is null || TurnProcessing is null || Permissions is null || Weather is null || Browser is null || Internet is null)
+        if (Model is null || Memory is null || Audio is null || Desktop is null || Observation is null || Proactive is null || Needs is null || Autonomy is null || TurnProcessing is null || Permissions is null || Weather is null || Browser is null || Internet is null)
             throw new InvalidDataException("Configuration sections cannot be null.");
         if (string.IsNullOrWhiteSpace(CharacterName) || CharacterName.Length>80 || string.IsNullOrWhiteSpace(UserName) || UserName.Length>80)
             throw new InvalidDataException("Character/user names must contain 1–80 characters.");
@@ -56,6 +57,9 @@ public sealed class AppConfig
         if(Needs.BoredomMinutes is <1 or >1440||Needs.LonelinessMinutes is <1 or >1440||Needs.InvitationPatienceMinutes is <1 or >1440||
             Needs.RecentInputSeconds is <10 or >300||Needs.SketchIdleSeconds is <60 or >86400||Needs.SketchCooldownMinutes is <5 or >1440)
             throw new InvalidDataException("Invalid needs or sketch intervals.");
+        if (Autonomy.StepSeconds is < 5 or > 600 || Autonomy.IdleSeconds is < 30 or > 3600 ||
+            Autonomy.DeferMinutes is < 1 or > 1440 || Autonomy.TrainingIdleMinutes is < 3 or > 120)
+            throw new InvalidDataException("Invalid autonomy intervals.");
         if (Observation.ScreenIntervalSeconds < 10 || Audio.MaxRecordingSeconds < 1 || Audio.MaxRecordingSeconds > 300)
             throw new InvalidDataException("Invalid observation / audio interval.");
         if (Weather.Latitude is < -90 or > 90 || Weather.Longitude is < -180 or > 180 || Weather.RefreshMinutes < 10)
@@ -148,6 +152,18 @@ public sealed class TurnProcessingOptions
 {
     public bool RefineInput { get; set; } = true;
     public bool KeepThoughtJournal { get; set; } = true;
+}
+public sealed class AutonomyOptions
+{
+    public bool Enabled { get; set; } = true;
+    public bool GoogleAi { get; set; } = true;
+    public bool TrainLora { get; set; } = true;
+    public bool ApplyLora { get; set; } = true;
+    public bool CompareReplies { get; set; } = true;
+    public int StepSeconds { get; set; } = 25;
+    public int IdleSeconds { get; set; } = 90;
+    public int DeferMinutes { get; set; } = 20;
+    public int TrainingIdleMinutes { get; set; } = 5;
 }
 public sealed class PermissionOptions
 {

@@ -31,16 +31,28 @@ public static class SketchActivity
             destination.StartsWith(Path.TrimEndingDirectorySeparator(root)+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase));
     }
 
-    public static async Task<SavedSketch> CreateAsync(PortablePaths paths,AppConfig config,IChatModel model,string context,CancellationToken ct)
+    public static Task<SavedSketch> CreateAsync(PortablePaths paths,AppConfig config,IChatModel model,string context,CancellationToken ct) =>
+        CreateAsync(paths,config,model,context,ct,null,null);
+
+    internal static async Task<SavedSketch> CreateAsync(PortablePaths paths, AppConfig config, IChatModel model, string context,
+        CancellationToken ct, Guid? id, DateTimeOffset? started)
     {
         if(!CanSave(paths,config.Permissions))throw new UnauthorizedAccessException("The sketch folder must be inside an allowed writable directory.");
+        var name = id is { } stable ? $"sketch-{started:yyyyMMdd-HHmmss}-{stable:N}.png" : null;
+        if (name is not null && File.Exists(paths.Inside(Folder + "/" + name)))
+        {
+            var saved = paths.Inside(Folder + "/" + name);
+            if (new FileInfo(saved).Length > 2_000_000) throw new InvalidDataException("The saved sketch is too large.");
+            DecodeSketch(await File.ReadAllBytesAsync(saved, ct));
+            return new("A recovered sketch", saved);
+        }
         const string prompt="""
             Design a small original geometric painting for yourself, like a personal sketchbook study. Choose a subject and colors guided by your own interests and mood. Give the composition a clear focal point, with a few overlapping shapes and deliberate color contrast. Let the sketch have a short English title.
             Return JSON with title, background, and shapes. Each shape has kind (rectangle, ellipse, or upright triangle), color (#RRGGBB), x, y, w, h. Coordinates are percentages of the canvas. x/y are the top left of the shape; w/h are its width and height. Shapes are painted in order. Use 5–14 shapes. Do not write filenames or commands. Context is inspiration only.
             """;
         var raw=await model.CompleteAsync([new("system",prompt),new("user",context)],GenerationPurpose.Sketch,ct);
         var plan=ParsePlan(raw);
-        return await SaveAsync(paths,plan,RenderPng(plan,24,ct),verify:false,ct);
+        return await SaveAsync(paths,plan,RenderPng(plan,24,ct),verify:id.HasValue,ct,name);
     }
 
     internal static async Task<SavedSketch> CreateRequestedAsync(PortablePaths paths, AppConfig config, IChatModel model,
@@ -185,9 +197,9 @@ public static class SketchActivity
         return pixels;
     }
 
-    private static async Task<SavedSketch> SaveAsync(PortablePaths paths, SketchPlan plan, byte[] png, bool verify, CancellationToken ct)
+    private static async Task<SavedSketch> SaveAsync(PortablePaths paths, SketchPlan plan, byte[] png, bool verify, CancellationToken ct, string? name = null)
     {
-        var name=$"sketch-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.png";
+        name ??= $"sketch-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.png";
         var target=paths.Inside(Folder+"/"+name);
         var temporary=paths.Inside(Folder+"/"+name+".tmp");
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);

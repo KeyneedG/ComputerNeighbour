@@ -20,6 +20,16 @@ ALPHA = 16
 MAX_TOKENS = 384
 MLP_MODULES = r"model\.language_model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)"
 PEFT_TENSOR = re.compile(r"base_model\.model\.model\.language_model\.layers\.(\d+)\.mlp\.(\w+)\.lora_([AB])\.weight")
+VALIDATION_DIALOGUE = [
+    {"prompt": "Do you remember the song I never told you the name of?",
+     "reply": "I don't know the song yet. Is there a line or a melody you remember?"},
+    {"prompt": "Could you slow down a bit? I'm trying to concentrate.",
+     "reply": "Sure. I'll give you some quiet."},
+    {"prompt": "What's an image you like for the start of autumn?",
+     "reply": "One bright leaf caught in the spokes of a bicycle. It makes the season feel like it snuck up on the street."},
+    {"prompt": "What is half of forty-six?",
+     "reply": "Twenty-three."},
+]
 
 
 def tokenize_examples(tokenizer, request):
@@ -52,6 +62,15 @@ def loss_for_example(model, example):
     # Use the prompt as context. Score only the final answer and its end token.
     logits = model(input_ids=tokens[:, :-1], use_cache=False, logits_to_keep=reply_length).logits
     return torch.nn.functional.cross_entropy(logits[0].float(), tokens[0, -reply_length:])
+
+
+def validate_losses(model, examples):
+    model.eval()
+    with torch.inference_mode():
+        values = [loss_for_example(model, example).item() for example in examples]
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Validation loss was not finite.")
+    return values
 
 
 def export_adapter(model, output):
@@ -89,6 +108,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--validate", action="store_true")
     options = parser.parse_args()
     request = json.load(sys.stdin)
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
@@ -100,7 +120,8 @@ def main():
     torch.set_num_threads(4)
     tokenizer = AutoTokenizer.from_pretrained(options.base, local_files_only=True, trust_remote_code=False)
     examples = tokenize_examples(tokenizer, request)
-    print(f"Loading the 4-bit training model for {len(examples)} approved examples.", flush=True)
+    validation = tokenize_examples(tokenizer, {**request, "examples": VALIDATION_DIALOGUE}) if options.validate else []
+    print(f"Loading the 4-bit training model for {len(examples)} dialogue examples.", flush=True)
     quantization = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                      bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
     model = Qwen3_5ForConditionalGeneration.from_pretrained(
@@ -112,6 +133,7 @@ def main():
                                            lora_dropout=0.0, bias="none", task_type="CAUSAL_LM"))
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(parameters, lr=8e-5, foreach=False)
+    before = validate_losses(model, validation) if validation else []
     model.train()
     order = list(range(len(examples))) * 2
     random.Random(3407).shuffle(order)
@@ -126,6 +148,13 @@ def main():
         optimizer.step()
         if step == 1 or step % 4 == 0 or step == len(order):
             print(f"Training step {step}/{len(order)}. Loss {value:.3f}.", flush=True)
+
+    if validation:
+        after = validate_losses(model, validation)
+        changes = [new - old for old, new in zip(before, after, strict=True)]
+        print(f"Held-out dialogue loss: {sum(before) / len(before):.3f} -> {sum(after) / len(after):.3f}.", flush=True)
+        if sum(changes) / len(changes) > 0.25 or max(changes) > 0.9:
+            raise ValueError("The new adapter degraded held-out dialogue.")
 
     export_adapter(model, options.output)
 
