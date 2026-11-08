@@ -18,13 +18,13 @@ internal static class CharacterGrowth
 
     public static IReadOnlyList<CharacterTrait> Apply(IReadOnlyList<CharacterTrait> traits,CharacterGrowthUpdate? update,string? userText,string? reply)
     {
-        if(update is null||string.IsNullOrWhiteSpace(userText)||update.Kind is not ("habit" or "interest")||
+        if(update is null||string.IsNullOrWhiteSpace(userText)||update.Kind is not ("habit" or "interest" or "taste")||
             update.Action is not ("explore" or "reinforce" or "reconsider")||
             !Clean(update.Name,3,64)||!Clean(update.Expression,8,160)||!Clean(update.Evidence,3,120))return traits;
         var evidence=update.Evidence.Trim();
         var userSignal=userText.Contains(evidence,StringComparison.OrdinalIgnoreCase);
         var expressed=update.Action=="explore"&&reply?.Contains(evidence,StringComparison.OrdinalIgnoreCase)==true;
-        if(!userSignal&&!expressed)return traits;
+        if(!userSignal&&!expressed||update.Kind=="taste"&&update.Action=="explore"&&!expressed)return traits;
 
         var name=Regex.Replace(update.Name.Trim().Replace('_',' '),@"\s+"," ");
         var expression=update.Expression.Trim();
@@ -56,13 +56,13 @@ internal static class CharacterGrowth
     }
 
     public static bool IsValid(IReadOnlyList<CharacterTrait>? traits)=>traits is {Count:<=Capacity}
-        && traits.All(t=>t is not null&&t.Kind is ("habit" or "interest")&&Clean(t.Name,3,64)&&Clean(t.Expression,8,160)
+        && traits.All(t=>t is not null&&t.Kind is ("habit" or "interest" or "taste")&&Clean(t.Name,3,64)&&Clean(t.Expression,8,160)
             &&t.Strength is >=1 and <=4&&t.LastSignal is {Length:64}&&t.LastSignal.All(Uri.IsHexDigit))
         && traits.DistinctBy(t=>t.Kind+" "+t.Name,StringComparer.OrdinalIgnoreCase).Count()==traits.Count;
 
     public static string Describe(IReadOnlyList<CharacterTrait> traits)
     {
-        if(traits.Count==0)return "No habits or interests have settled yet.";
+        if(traits.Count==0)return "No habits, interests or tastes have settled yet.";
         return string.Join("\n",traits.OrderByDescending(t=>t.Strength).Select(t=>
             $"- {(t.Established?"Established":"Exploring")} {t.Kind} · {t.Name}. {t.Expression}"));
     }

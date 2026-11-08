@@ -3,7 +3,13 @@ namespace ComputerNeighbour.Configuration;
 public sealed class PortablePaths
 {
     public string Root { get; }
-    public PortablePaths(string root) { Root = Path.GetFullPath(root); }
+    internal string UserDocuments { get; }
+    public PortablePaths(string root) : this(root, Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)) { }
+    internal PortablePaths(string root, string userDocuments)
+    {
+        Root = Path.GetFullPath(root);
+        UserDocuments = userDocuments;
+    }
     public string Inside(string relative)
     {
         if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative)) throw new InvalidDataException("Use a relative path inside ComputerNeighbour: " + relative);

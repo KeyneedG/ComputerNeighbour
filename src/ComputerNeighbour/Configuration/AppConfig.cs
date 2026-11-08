@@ -171,7 +171,7 @@ public sealed class PermissionOptions
     public bool WeatherNetwork { get; set; } = false;
     public List<string> ReadableDirectories { get; set; } = ["documents"];
     public List<string> WritableDirectories { get; set; } = ["documents"];
-    public Dictionary<string,string> AllowedApplications { get; set; } = new() { ["notepad"] = "notepad.exe", ["calculator"] = "calc.exe" };
+    public Dictionary<string,string> AllowedApplications { get; set; } = new() { ["notepad"] = "notepad.exe", ["calculator"] = "calc.exe", ["paint"] = "mspaint.exe" };
 }
 public sealed class WeatherOptions
 {

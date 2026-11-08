@@ -3,6 +3,7 @@ using System.Text.Json;
 using ComputerNeighbour.Application;
 using ComputerNeighbour.Audio;
 using ComputerNeighbour.Inference;
+using ComputerNeighbour.Personality;
 
 namespace ComputerNeighbour.Tests;
 
@@ -81,6 +82,15 @@ internal static class SpeechTests
             Check.Equal("Dr. Lane is here to help\nif you want to talk.", plan[0].Text);
             Check.True(plan.All(sentence => sentence.Emotion == SpeechEmotion.Warm), "Directions shifted across a soft line break.");
         });
+        await suite.Case("a mixed reply can shift from pride to nostalgia between spoken sentences", async _ =>
+        {
+            const string reply = "I'm proud we made it through. I'll miss those late edits.";
+            var plan = await SpeechDirector.PlanAsync(reply, reply, [], "thoughtful",
+                new ContextModel("proud", "nostalgic"), default);
+            Check.Equal(SpeechEmotion.Proud, plan[0].Emotion);
+            Check.Equal(SpeechEmotion.Nostalgic, plan[1].Emotion);
+            Check.True(RecentReaction.Labels.All(label => SpeechDelivery.TryReadEmotion(label, out var _)), "A reaction has no voice direction.");
+        });
     }
 
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -90,7 +100,7 @@ internal static class SpeechTests
         public ValueTask DisposeAsync() { onDispose(); return ValueTask.CompletedTask; }
     }
 
-    private sealed class ContextModel : ITurnContextModel
+    private sealed class ContextModel(params string[] labels) : ITurnContextModel
     {
         public string? LatestUser { get; private set; }
         public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) => throw new NotSupportedException();
@@ -99,7 +109,7 @@ internal static class SpeechTests
             using var document = JsonDocument.Parse(messages[^1].Text);
             LatestUser = document.RootElement.GetProperty("latestUser").GetString();
             Check.Equal(2, sentenceCount);
-            return Task.FromResult<string?>("""{"emotions":["warm","warm"]}""");
+            return Task.FromResult<string?>(JsonSerializer.Serialize(new { emotions = labels.Length == 0 ? ["warm","warm"] : labels }));
         }
     }
 }

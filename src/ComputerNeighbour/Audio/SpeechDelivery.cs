@@ -2,7 +2,12 @@ using System.Text.RegularExpressions;
 
 namespace ComputerNeighbour.Audio;
 
-internal enum SpeechEmotion { Neutral, Warm, Playful, Joyful, Surprised, Sad, Concerned, Angry, Afraid }
+internal enum SpeechEmotion
+{
+    Neutral, Warm, Playful, Joyful, Surprised, Sad, Concerned, Angry, Afraid,
+    Proud, Relieved, Awkward, Nostalgic, Eager, Frustrated, Regretful, Grateful, Excited,
+    Fond, Indignant, Impressed, Content, Uncertain, Envious, Empathetic
+}
 
 internal sealed record SpeechSentence(string Text, SpeechEmotion Emotion = SpeechEmotion.Neutral);
 
@@ -31,6 +36,22 @@ internal static class SpeechDelivery
         SpeechEmotion.Concerned => "Sound calmly attentive and concerned.",
         SpeechEmotion.Angry => "Let some restrained irritation show through steady, clear speech.",
         SpeechEmotion.Afraid => "Sound a little uneasy while speaking clearly.",
+        SpeechEmotion.Proud => "Sound quietly proud and satisfied.",
+        SpeechEmotion.Relieved => "Let the tension ease into a softer voice.",
+        SpeechEmotion.Awkward => "Sound briefly sheepish, then regain ease.",
+        SpeechEmotion.Nostalgic => "Sound fond and reflective, as if remembering a particular moment.",
+        SpeechEmotion.Eager => "Sound expectant, with a small lift in energy.",
+        SpeechEmotion.Frustrated => "Let a touch of exasperation settle into a practical tone.",
+        SpeechEmotion.Regretful => "Sound thoughtful with a hint of regret.",
+        SpeechEmotion.Grateful => "Sound personally appreciative and sincere.",
+        SpeechEmotion.Excited => "Let the pace pick up slightly with keen interest.",
+        SpeechEmotion.Fond => "Sound gently charmed, with a soft smile.",
+        SpeechEmotion.Indignant => "Sound briefly indignant, with firm and clear emphasis.",
+        SpeechEmotion.Impressed => "Let quiet admiration come through.",
+        SpeechEmotion.Content => "Sound at ease, with quiet satisfaction.",
+        SpeechEmotion.Uncertain => "Sound thoughtful and mildly unsure.",
+        SpeechEmotion.Envious => "Sound lightly wistful, with a generous tone.",
+        SpeechEmotion.Empathetic => "Sound attentive and sympathetic, with room for the words to land.",
         _ => "Use an even tone with natural emphasis."
     });
 }

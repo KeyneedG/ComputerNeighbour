@@ -18,15 +18,27 @@ public sealed class FileWorkspace
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private readonly PortablePaths paths;
     private readonly string[] writableDirectories;
+    private readonly string? userDestination;
     private readonly int maxFileBytes;
     private static readonly SemaphoreSlim CommitGate = new(1, 1);
 
     public FileWorkspace(PortablePaths paths, IEnumerable<string> writableDirectories, int maxFileBytes = 1_000_000)
+        : this(paths, writableDirectories, maxFileBytes, null) { }
+
+    internal FileWorkspace(PortablePaths paths, IEnumerable<string> writableDirectories, int maxFileBytes, string? userDestination)
     {
         ArgumentNullException.ThrowIfNull(paths); ArgumentNullException.ThrowIfNull(writableDirectories);
         if (maxFileBytes is < 1 or > 10_000_000) throw new ArgumentOutOfRangeException(nameof(maxFileBytes));
         this.paths = paths; this.maxFileBytes = maxFileBytes;
         this.writableDirectories = writableDirectories.Select(ValidateDirectory).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (userDestination is not null)
+        {
+            var documents = paths.UserDocuments;
+            if (!Path.IsPathFullyQualified(documents) || !Path.IsPathFullyQualified(userDestination) ||
+                !IsWithinOrEqual(userDestination, documents))
+                throw new UnauthorizedAccessException("Explicit Windows destinations must be inside your Documents folder.");
+            this.userDestination = userDestination;
+        }
     }
 
     public async Task<PreparedFileChange> PrepareCreateAsync(string path, string content, CancellationToken cancellationToken = default)
@@ -120,7 +132,7 @@ public sealed class FileWorkspace
                     relativePath = change.RelativePath, tool = change.Tool, beforeSha256 = change.BeforeSha256,
                     afterSha256 = Hash(payload), encoding = encoding.Encoding.WebName,
                     preambleHex = Convert.ToHexString(encoding.Preamble), preparedBackupAt = DateTimeOffset.UtcNow,
-                    restore = "Copy before.bin back to relativePath inside the portable root to restore the original bytes."
+                    restore = "Copy before.bin back to the recorded path. Relative paths are inside the portable root."
                 };
                 await WriteDurableNewAsync(paths.Inside(directory + "/metadata.json"), Utf8.GetBytes(JsonSerializer.Serialize(metadata, AppConfig.Json)), cancellationToken);
                 // Optimistic concurrency: a stale reviewed proposal must never knowingly overwrite newer data.
@@ -160,11 +172,25 @@ public sealed class FileWorkspace
     }
     private string ResolveWritable(string relative)
     {
-        var parts = ValidateSegments(relative);
-        if (parts.Length < 2 || IsProtected(parts[0])) throw new UnauthorizedAccessException("App internals and root files are not a writable workspace.");
-        var full = paths.Inside(string.Join(Path.DirectorySeparatorChar, parts));
-        if (!writableDirectories.Any(d => full.StartsWith(d + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
-            throw new UnauthorizedAccessException("The file is outside permissions.writableDirectories.");
+        string full;
+        if (userDestination is not null && Path.IsPathFullyQualified(relative))
+        {
+            var root = Path.GetPathRoot(relative)!;
+            var parts = ValidateSegments(relative[root.Length..]);
+            full = Path.Combine(root, Path.Combine(parts));
+            if (!string.Equals(Path.GetDirectoryName(full), userDestination, StringComparison.OrdinalIgnoreCase) ||
+                IsWithinOrEqual(full, paths.Root))
+                throw new UnauthorizedAccessException("Use a file directly inside the requested Windows Documents folder.");
+            TextFileReader.EnsureNoLinks(full);
+        }
+        else
+        {
+            var parts = ValidateSegments(relative);
+            if (parts.Length < 2 || IsProtected(parts[0])) throw new UnauthorizedAccessException("App internals and root files are not a writable workspace.");
+            full = paths.Inside(string.Join(Path.DirectorySeparatorChar, parts));
+            if (!writableDirectories.Any(d => full.StartsWith(d + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+                throw new UnauthorizedAccessException("The file is outside permissions.writableDirectories.");
+        }
         if (!Extensions.Contains(Path.GetExtension(full))) throw new UnauthorizedAccessException("Only approved plain text formats can be written; executable and script formats are disabled.");
         if (Directory.Exists(full)) throw new IOException("The target is a directory.");
         return full;
@@ -184,7 +210,25 @@ public sealed class FileWorkspace
         }
         return parts;
     }
-    private string Relative(string full) => Path.GetRelativePath(paths.Root, full).Replace('\\', '/');
+    internal static string ResolveRequestedDestination(PortablePaths paths, string directory)
+    {
+        if (Path.IsPathFullyQualified(directory))
+        {
+            var root = Path.GetPathRoot(directory)!;
+            return Path.Combine(root, Path.Combine(ValidateSegments(directory[root.Length..])));
+        }
+        var parts = ValidateSegments(directory);
+        if (parts[0] != "Documents") return string.Join(Path.DirectorySeparatorChar, parts);
+        if (!Path.IsPathFullyQualified(paths.UserDocuments)) throw new IOException("Windows did not report a Documents folder.");
+        return Path.Combine(paths.UserDocuments, Path.Combine(parts[1..]));
+    }
+
+    private static bool IsWithinOrEqual(string path, string directory) =>
+        string.Equals(path, directory, StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith(Path.TrimEndingDirectorySeparator(directory) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    private string Relative(string full) => IsWithinOrEqual(full, paths.Root)
+        ? Path.GetRelativePath(paths.Root, full).Replace('\\', '/') : full;
     private void EnsureSize(int bytes) { if (bytes > maxFileBytes) throw new IOException($"File exceeds the writable limit of {maxFileBytes} bytes."); }
     private async Task<byte[]> ReadBoundedAsync(string full, CancellationToken cancellationToken)
     {

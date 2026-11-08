@@ -92,6 +92,52 @@ internal static class FileEngineTests
             Check.True(!fixture.Output.Lines.Any(l=>l.Contains("[Approval")),"A full-access user write was still queued.");
             Check.Equal(0,model.Calls);
         });
+        await suite.Case("the reported Pushkin request preserves Windows Documents and follows session approvals", async root =>
+        {
+            const string request = "привет, можешь создать текстовый документ и написать в нем простой стих пушкина. сохрани все в папку Documents/Evenlin/";
+            var model = new ScriptedModel();
+            var portableRoot = Path.Combine(root, "portable");
+            var userDocuments = Path.Combine(root, "WindowsDocuments");
+            var destination = Path.Combine(userDocuments, "Evenlin");
+            await using var fixture = await Fixture.CreateAsync(portableRoot, model, userDocuments: userDocuments);
+
+            await fixture.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await fixture.Engine.RespondAsync(request, "user", false, false, default);
+            var first = Path.Combine(destination, "pushkin_poem.txt");
+            Check.Equal(PushkinPoetry.Text, await File.ReadAllTextAsync(first));
+            Check.True(!Directory.Exists(Path.Combine(portableRoot, "documents", "Evenlin")), "The write was redirected into the portable workspace.");
+            Check.True(!fixture.Output.Lines.Any(line => line.Contains("[Approval")), "Session full access requested an approval.");
+            Check.True(fixture.Output.Lines.Last().Contains(first) && fixture.Output.Lines.Last().Contains("Verified the saved bytes."),
+                "The reply did not report the verified Windows path.");
+
+            await fixture.Engine.TryHandleAccessCommandAsync("/ask before edit", default);
+            await fixture.Engine.RespondAsync(request, "user", false, false, default);
+            var second = Path.Combine(destination, "pushkin_poem_2.txt");
+            Check.True(!File.Exists(second), "Ask mode applied a write before approval.");
+            Check.Equal(1, fixture.Output.Lines.Count(line => line.Contains("[Approval 1]")));
+            await fixture.Engine.ApproveAsync(1, default);
+            Check.Equal(PushkinPoetry.Text, await File.ReadAllTextAsync(second));
+            Check.Equal(0, model.Calls);
+        });
+        await suite.Case("the model cannot change an explicitly requested destination folder", async root =>
+        {
+            var portableRoot = Path.Combine(root, "portable");
+            var userDocuments = Path.Combine(root, "WindowsDocuments");
+            var wrongPath = Path.Combine(userDocuments, "Evelyn", "note.txt");
+            var rightPath = Path.Combine(userDocuments, "Evenlin", "note.txt");
+            string Step(string? path) => JsonSerializer.Serialize(new
+            {
+                plan = Array.Empty<string>(),
+                action = path is null ? null : new { tool = "create_file", args = new { path, content = "Draft" } },
+                reply = path is null ? "Created the note." : ""
+            });
+            var model = new ScriptedModel(Step(wrongPath), Step(rightPath), Step(null));
+            await using var fixture = await Fixture.CreateAsync(portableRoot, model, userDocuments: userDocuments);
+            await fixture.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await fixture.Engine.RespondAsync("Create a text document with a short note. Save it to folder Documents/Evenlin/", "user", false, false, default);
+            Check.True(!File.Exists(wrongPath), "The model wrote to its preferred directory.");
+            Check.Equal("Draft", await File.ReadAllTextAsync(rightPath));
+        });
         await suite.Case("mixed-case model file actions retain the file-specific approval gate and concrete preview", async root =>
         {
             var model=new ScriptedModel(Decision(new ToolRequest("CrEaTe_FiLe",Args(new {path="documents/mixed.txt",content="reviewed"}))),Decision());
@@ -102,6 +148,15 @@ internal static class FileEngineTests
             await fixture.Engine.ApproveAsync(1,CancellationToken.None);
             Check.Equal("reviewed",await File.ReadAllTextAsync(Path.Combine(root,"documents","mixed.txt")));
             Check.Equal(2,model.Calls);
+        });
+        await suite.Case("repeated model requests announce and queue a file proposal once", async root =>
+        {
+            var request = new ToolRequest("create_file", Args(new { path = "documents/once.txt", content = "Once" }));
+            var model = new ScriptedModel(Decision(request), Decision(request), Decision(request), Decision());
+            await using var fixture = await Fixture.CreateAsync(root, model);
+            await fixture.Engine.RespondAsync("Keep a note about our plan.", "user", false, false, default);
+            Check.Equal(1, fixture.Output.Lines.Count(line => line.Contains("I'll prepare the new file for you to review.")));
+            Check.Equal(1, fixture.Output.Lines.Count(line => line.Contains("[Approval 1]")));
         });
         await suite.Case("file writing permission denies user requests and remains authoritative over full access", async root =>
         {
@@ -177,9 +232,9 @@ internal static class FileEngineTests
         public required AudioService Audio {get;init;}
         public required WeatherService Weather {get;init;}
         public required CapturingOutput Output {get;init;}
-        public static async Task<Fixture> CreateAsync(string root,IChatModel model,Action<AppConfig>? configure=null)
+        public static async Task<Fixture> CreateAsync(string root,IChatModel model,Action<AppConfig>? configure=null,string? userDocuments=null)
         {
-            var paths=new PortablePaths(root);var config=new AppConfig();
+            var paths=userDocuments is null ? new PortablePaths(root) : new PortablePaths(root, userDocuments);var config=new AppConfig();
             config.Audio.Enabled=false;config.Browser.Enabled=false;
             config.Permissions.Microphone=false;config.Permissions.ScreenCapture=false;config.Permissions.ForegroundWindow=false;
             config.Permissions.SystemStatus=false;config.Permissions.WeatherNetwork=false;config.Permissions.ReadBrowser=false;

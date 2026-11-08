@@ -16,9 +16,9 @@ namespace ComputerNeighbour.Tests;
 /// <summary>Conversation contract checks, independent of exact model wording or live peripherals.</summary>
 internal static class ConversationQualityTests
 {
-    private static string Metadata(List<ToolRequest>? actions=null,string reply="",CharacterGrowthUpdate? growth=null)=>JsonSerializer.Serialize(new CompanionDecision
+    private static string Metadata(List<ToolRequest>? actions=null,string reply="",CharacterGrowthUpdate? growth=null,ReactionUpdate? reaction=null)=>JsonSerializer.Serialize(new CompanionDecision
     {
-        Speak=false,Reply=reply,Memory="",Emotion=new(),Relationship=new(),Actions=actions??[],Growth=growth
+        Speak=false,Reply=reply,Memory="",Emotion=new(),Relationship=new(),Actions=actions??[],Growth=growth,Reaction=reaction
     },AppConfig.Json);
     private static Dictionary<string,JsonElement> Args(object value)=>JsonSerializer.Deserialize<Dictionary<string,JsonElement>>(JsonSerializer.Serialize(value))!;
 
@@ -203,6 +203,43 @@ internal static class ConversationQualityTests
             await f.Engine.RespondAsync("I took a long walk yesterday.","user",false,false,default);
             await f.Engine.RespondAsync("There is a junction on screen.","environment",true,false,default);
             Check.Equal(0,f.Emotions.State.Traits.Count);
+        });
+        await suite.Case("mixed reactions carry grounded context briefly and tastes grow from Evelyn's own replies",async root=>
+        {
+            const string detail="laughter cuts to silence";
+            var taste=new CharacterGrowthUpdate("explore","taste","A sudden quiet ending","I love endings that suddenly go quiet.",detail);
+            var mixed=new ReactionUpdate(["proud","nostalgic"],detail);
+            var model=new ScriptedModel("I love how the laughter cuts to silence. I'm proud we found that ending.",Metadata(growth:taste,reaction:mixed),
+                "That pause would make the final shot feel different.",Metadata(growth:taste with {Action="reinforce",Evidence="same pause"},
+                    reaction:new(["relieved"],"the recovered backup")));
+            await using var f=await Fixture.CreateAsync(root,model);
+            await f.Engine.RespondAsync("I think our new ending is ready.","user",false,false,default);
+            Check.True(model.Calls[0].Messages[0].Text.Contains("Express feelings sparingly"),"Low trust did not affect disclosure.");
+            Check.True(model.Calls[0].Messages[0].Text.Contains("This is the first recorded reply"),"A fresh conversation was not distinguished from shared history.");
+            var first=f.Emotions.ActiveReaction(DateTimeOffset.UtcNow)!;
+            Check.Equal("proud + nostalgic",first.Feelings);
+            Check.Equal(detail,first.Detail);
+            Check.True(f.Emotions.ActiveReaction(first.At.AddMinutes(30)) is null,"A reaction survived its time limit.");
+
+            for(var i=0;i<15;i++)await f.Emotions.ApplyAsync(new() {Trust=.025});
+            await f.Emotions.ApplyAsync(null,observedUserText:"I love soft pastels.",completedReply:"That makes sense.",
+                growth:new("explore","taste","Soft pastels","I love soft pastels.","soft pastels"));
+            Check.Equal(1,f.Emotions.State.Traits.Count);
+            Check.True(f.Emotions.ActiveReaction(DateTimeOffset.UtcNow) is null,"A reaction survived repeated turns.");
+            await f.Emotions.ApplyAsync(null,observedUserText:"That cut to black was a surprise.",reaction:new(["surprised"],"cut to black"));
+            await f.Engine.RespondAsync("Let's try the same pause before the final shot.","user",false,false,default);
+            var nextPrompt=model.Calls[2].Messages[0].Text;
+            Check.True(nextPrompt.Contains("be candid")&&nextPrompt.Contains("cut to black")&&!nextPrompt.Contains("This is the first recorded reply"),
+                "High trust, shared history or the grounded aftertaste was lost.");
+            Check.Equal("cut to black",f.Emotions.ActiveReaction(DateTimeOffset.UtcNow)!.Detail);
+            Check.True(f.Emotions.State.Traits.Single().Established,"A separate exchange did not establish the taste.");
+
+            var restarted=new EmotionEngine(root);
+            await restarted.InitializeAsync();
+            Check.True(restarted.State.Traits.Single().Established,"The taste did not survive a restart.");
+            Check.True(restarted.ActiveReaction(DateTimeOffset.UtcNow) is null,"A short-lived reaction leaked to disk.");
+            await f.Engine.ForgetConversationAsync(default);
+            Check.True(f.Emotions.ActiveReaction(DateTimeOffset.UtcNow) is null,"Forget retained an emotional trace.");
         });
     }
 

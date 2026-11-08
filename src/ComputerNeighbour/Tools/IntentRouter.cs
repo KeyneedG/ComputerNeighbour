@@ -51,6 +51,7 @@ public static class IntentRouter
             foreach(var alias in permissions.AllowedApplications.Keys)
                 if(name.Equals(alias,StringComparison.OrdinalIgnoreCase))return New("open_app",new {name=alias});
             if(name.Equals("калькулятор",StringComparison.OrdinalIgnoreCase)&&permissions.AllowedApplications.ContainsKey("calculator"))return New("open_app",new {name="calculator"});
+            if(Regex.IsMatch(name,@"^(?:mspaint|microsoft paint|п[еэ]йнт|паинт)$",RegexOptions.IgnoreCase)&&permissions.AllowedApplications.ContainsKey("paint"))return New("open_app",new {name="paint"});
             if(name.Equals("блокнот",StringComparison.OrdinalIgnoreCase)&&permissions.AllowedApplications.ContainsKey("notepad"))return New("open_app",new {name="notepad"});
         }
         return null;
@@ -58,7 +59,8 @@ public static class IntentRouter
     internal static string CommandText(string text,string? characterName=null)
     {
         var request=Regex.Replace(text.Trim(),"^(?:"+(string.IsNullOrWhiteSpace(characterName)?"":Regex.Escape(characterName)+"|")+@"Evelyn|Evelin|Эвелин\p{L}*)\s*[,!:]\s*","",RegexOptions.IgnoreCase);
-        return Regex.Replace(request,@"^(?:(?:please|can you|could you|would you|можешь|могла бы|пожалуйста)[,\s]+)+","",RegexOptions.IgnoreCase);
+        request=Regex.Replace(request,@"^(?:hello|hi|hey|привет|здравствуй(?:те)?)[,!\s]+","",RegexOptions.IgnoreCase);
+        return Regex.Replace(request,@"^(?:(?:please|can you|could you|would you|yes|okay|try to|можешь|могла бы|пожалуйста|да|хорошо|попробуй|попробовать)[,!\s]+)+","",RegexOptions.IgnoreCase);
     }
     internal static bool IsWebCorrection(string text)=>WebFollowupPrefix(text).Success;
     internal static Match WebFollowupPrefix(string text)=>Regex.Match(text,@"^(?:(?:no|actually|неа|нет|вообще-то)[,!\s]+)?(?:(?:check|look|search)\s+(?:on the (?:web|internet)|online)|(?:look it up|google it)(?:\s+(?:on the (?:web|internet)|online))?|(?:посмотри|проверь|поищи|найди|поискать|искать)\s+(?:это\s+)?(?:в интернете|в сети|в гугле|онлайн)|погугли это)\b",RegexOptions.IgnoreCase);

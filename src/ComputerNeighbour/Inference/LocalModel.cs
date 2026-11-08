@@ -3,17 +3,18 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using ComputerNeighbour.Audio;
 using ComputerNeighbour.Configuration;
+using ComputerNeighbour.Personality;
 using ComputerNeighbour.Platform;
 
 namespace ComputerNeighbour.Inference;
 
 public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
-public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep }
+public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep, RequestedSketch, SketchReview }
 public interface IChatModel
 {
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct);
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,
-        purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.WorkTask
+        purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.RequestedSketch or GenerationPurpose.SketchReview or GenerationPurpose.WorkTask
             or GenerationPurpose.WorkStep or GenerationPurpose.DeepWorkStep,ct);
 }
 
@@ -43,12 +44,18 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
     private static readonly JsonElement SketchSchema=JsonSerializer.Deserialize<JsonElement>("""
     {"type":"object","additionalProperties":false,"required":["title","background","shapes"],"properties":{
       "title":{"type":"string","maxLength":80},"background":{"type":"string","pattern":"^#[0-9a-fA-F]{6}$"},
-      "shapes":{"type":"array","minItems":3,"maxItems":24,"items":{"type":"object","additionalProperties":false,
-        "required":["kind","color","x","y","w","h"],"properties":{
-          "kind":{"type":"string","enum":["rectangle","ellipse","triangle"]},"color":{"type":"string","pattern":"^#[0-9a-fA-F]{6}$"},
+      "shapes":{"type":"array","minItems":3,"maxItems":36,"items":{"type":"object","additionalProperties":false,
+        "required":["kind","color"],"properties":{
+          "kind":{"type":"string","enum":["rectangle","ellipse","triangle","polygon"]},"color":{"type":"string","pattern":"^#[0-9a-fA-F]{6}$"},
           "x":{"type":"integer","minimum":0,"maximum":99},"y":{"type":"integer","minimum":0,"maximum":99},
-          "w":{"type":"integer","minimum":1,"maximum":100},"h":{"type":"integer","minimum":1,"maximum":100}
+          "w":{"type":"integer","minimum":1,"maximum":100},"h":{"type":"integer","minimum":1,"maximum":100},
+          "points":{"type":"array","minItems":3,"maxItems":24,"items":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer","minimum":0,"maximum":100}}}
         }}}
+    }}
+    """);
+    private static readonly JsonElement SketchReviewSchema=JsonSerializer.Deserialize<JsonElement>("""
+    {"type":"object","additionalProperties":false,"required":["matches","reason"],"properties":{
+      "matches":{"type":"boolean"},"reason":{"type":"string","maxLength":180}
     }}
     """);
     private static readonly JsonElement WorkTaskSchema=JsonSerializer.Deserialize<JsonElement>("""
@@ -67,10 +74,10 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
       "reply":{"type":"string","maxLength":3600}
     }}
     """);
-    private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>("""
-    {"type":"object","additionalProperties":false,"required":["growth","speak","reply","memory","emotion","relationship","actions"],"properties":{
+    private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>($$$$$"""
+    {"type":"object","additionalProperties":false,"required":["growth","speak","reply","memory","emotion","relationship","actions","reaction"],"properties":{
       "growth":{"anyOf":[{"type":"object","additionalProperties":false,"required":["action","kind","name","expression","evidence"],"properties":{
-        "action":{"type":"string","enum":["explore","reinforce","reconsider"]},"kind":{"type":"string","enum":["habit","interest"]},
+        "action":{"type":"string","enum":["explore","reinforce","reconsider"]},"kind":{"type":"string","enum":["habit","interest","taste"]},
         "name":{"type":"string","maxLength":64},"expression":{"type":"string","maxLength":160},"evidence":{"type":"string","maxLength":120}
       }},{"type":"null"}]},
       "speak":{"type":"boolean"},"reply":{"type":"string","maxLength":4000},"memory":{"type":"string","maxLength":1000},
@@ -78,7 +85,11 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
         "warmth":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"trust":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"closeness":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},
         "valence":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"energy":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"stress":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"curiosity":{"type":"number","enum":[-0.03,-0.02,-0.01,0,0.01,0.02,0.03]},"reason":{"type":"string","maxLength":160}}},
       "relationship":{"type":"object","additionalProperties":false,"required":["currentAttitude","recentImpression","appreciates","concerns","boundaries"],"properties":{"currentAttitude":{"type":["string","null"],"maxLength":500},"recentImpression":{"type":["string","null"],"maxLength":300},"appreciates":{"type":["array","null"],"maxItems":5,"items":{"type":"string","maxLength":160}},"concerns":{"type":["array","null"],"maxItems":5,"items":{"type":"string","maxLength":160}},"boundaries":{"type":["array","null"],"maxItems":5,"items":{"type":"string","maxLength":160}}}},
-      "actions":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["tool","args"],"properties":{"tool":{"type":"string","maxLength":80},"args":{"type":"object"}}}}
+      "actions":{"type":"array","maxItems":3,"items":{"type":"object","additionalProperties":false,"required":["tool","args"],"properties":{"tool":{"type":"string","maxLength":80},"args":{"type":"object"}}}},
+      "reaction":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["feelings","detail"],"properties":{
+        "feelings":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string","enum":{{{{{JsonSerializer.Serialize(RecentReaction.Labels)}}}}}}},
+        "detail":{"type":"string","minLength":6,"maxLength":120}
+      }}]}
     }}
     """);
     private readonly HttpClient client = new() { BaseAddress = new Uri(options.Endpoint.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds) };
@@ -243,6 +254,8 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
     private Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct,bool useAdapter)=>purpose switch
     {
         GenerationPurpose.Sketch => RequestAsync(messages,true,.65,false,ct,SketchSchema,1350),
+        GenerationPurpose.RequestedSketch => RequestAsync(messages,true,.25,false,ct,SketchSchema,3000),
+        GenerationPurpose.SketchReview => RequestAsync(messages,true,0,false,ct,SketchReviewSchema,240),
         GenerationPurpose.WorkTask => RequestAsync(messages,true,0,false,ct,WorkTaskSchema,1000),
         GenerationPurpose.StandardDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(1200,options.MaxReplyTokens+240),thinkingBudget:192,useAdapter:useAdapter),
         GenerationPurpose.DeepDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(2000,options.MaxReplyTokens+800),thinkingBudget:640,useAdapter:useAdapter),

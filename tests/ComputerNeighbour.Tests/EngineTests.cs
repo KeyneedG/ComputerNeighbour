@@ -23,13 +23,13 @@ internal static class EngineTests
     {
         await suite.Case("incognito uses the current context and discards all experimental state on exit", async root =>
         {
-            static string Attitude(string attitude, double trust) => JsonSerializer.Serialize(new CompanionDecision
+            static string Attitude(string attitude, double trust, ReactionUpdate reaction) => JsonSerializer.Serialize(new CompanionDecision
             {
                 Speak = false, Emotion = new() { Trust = trust, Reason = attitude },
-                Relationship = new() { CurrentAttitude = attitude }, Actions = []
+                Relationship = new() { CurrentAttitude = attitude }, Actions = [], Reaction = reaction
             }, AppConfig.Json);
-            var model = new ScriptedModel("The regular reply.", Attitude("REGULAR_ATTITUDE", .02), "REGULAR_SUMMARY",
-                "The experimental reply.", Attitude("EXPERIMENTAL_ATTITUDE", -.02),
+            var model = new ScriptedModel("The regular reply.", Attitude("REGULAR_ATTITUDE", .02, new(["eager"],"blue bridge")), "REGULAR_SUMMARY",
+                "The experimental reply.", Attitude("EXPERIMENTAL_ATTITUDE", -.02, new(["excited","uncertain"],"red boat")),
                 "The sample screenshot shows an open test window.", "EXPERIMENTAL_SUMMARY");
             await using var f = await Fixture.CreateAsync(root, model, capture: () => [1, 2, 3]);
             f.Config.Permissions.ScreenCapture = true;
@@ -42,6 +42,7 @@ internal static class EngineTests
             await f.Engine.RespondAsync("write documents/normal.md | Reviewed before the experiment", "user", false, false, default);
             var regularRelationship = await f.Engine.GetRelationshipAsync(default);
             var regularStatus = f.Engine.DescribeStatus();
+            Check.True(regularStatus.Contains("Recent feeling: eager"), "The regular reaction was not available.");
             var regularNotes = await f.Engine.GetThoughtsAsync(default);
             Dictionary<string, string> Snapshot() => Directory.EnumerateFiles(Path.Combine(root, "data"), "*", SearchOption.AllDirectories)
                 .ToDictionary(path => path, path => Convert.ToBase64String(File.ReadAllBytes(path)));
@@ -64,6 +65,7 @@ internal static class EngineTests
             await experiment.RespondAsync("Show the sources.", "user", false, false, default);
             Check.True(f.Output.Lines.Last().Contains("https://example.org/baseline"), "Incognito missed the existing sources.");
             await experiment.RespondAsync("Call me Jordan. Let's try a red boat.", "user", false, false, default);
+            Check.True(experiment.DescribeStatus().Contains("Recent feeling: excited + uncertain"), "The experimental feelings were not isolated in the active session.");
             var experimentalRelationship = await experiment.GetRelationshipAsync(default);
             Check.True(experimentalRelationship.Contains("Main user: Jordan") &&
                 experimentalRelationship.Contains("EXPERIMENTAL_ATTITUDE"), "A renamed user lost their experimental relationship.");
@@ -355,6 +357,164 @@ internal static class EngineTests
             Check.True(model.Calls[2].Messages.Last().Image is [4, 5, 6] && model.Calls[3].Messages.Last().Image is null,
                 "The workflow reused a stale image or missed the successful verification image.");
             Check.True(f.Output.Lines.Last().Contains("Inspect the foreground"), "The lost target was not reported.");
+        });
+
+        const string notepadRequest = "Привет можешь написать в блокноте какой-то короткий стих пушкина";
+        await suite.Case("a direct Notepad request overrides a chat classification and reports disabled desktop input", async root =>
+        {
+            var model = new WorkflowModel([Routing("chat", "standard")]);
+            await using var f = await Fixture.CreateAsync(root, model);
+            f.Config.Permissions.ScreenCapture = true;
+            await f.Engine.RespondAsync(notepadRequest, "user", false, false, default);
+            Check.True(f.Output.Lines.Last().Contains("/desktop on"), "The request did not report the missing permission.");
+            Check.Equal(0, model.Calls.Count, "A blocked desktop request should end before planning or dialogue");
+        });
+
+        await suite.Case("Notepad writing retries an invalid step, types multiline text and inspects the new frame", async root =>
+        {
+            const string poem = "Я вас любил: любовь ещё, быть может,\nВ душе моей угасла не совсем.";
+            var blank = new WorkFrame(new(10, 10, 11, "Notepad", "Untitled", 80, 100, 1000, 600), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(blank, blank with { Image = [4, 5, 6] });
+            var model = new WorkflowModel([Routing("chat", "standard")],
+                WorkStep("observe_window", new {}, plan: ["Inspect Notepad", "Enter the excerpt", "Check the text"]),
+                "{incomplete",
+                WorkStep("type_text", new { text = poem }),
+                WorkStep(reply: "I entered the excerpt in Notepad and checked the result."));
+            await using var f = await Fixture.CreateAsync(root, model, workDesktop: desktop);
+            f.Config.Permissions.ScreenCapture = true;
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await f.Engine.RespondAsync(notepadRequest, "user", false, false, default);
+            Check.Equal(poem, desktop.Typed.Single());
+            Check.Equal(2, desktop.Captures);
+            Check.True(f.Output.Lines.Any(line => line.StartsWith("[Plan]")), "No plan was shown.");
+            Check.True(model.Calls[2].Messages.Last().Text.Contains("Return only the requested JSON"), "An invalid step was not retried.");
+            Check.True(model.Calls[3].Messages.Last().Image is [4, 5, 6] && model.Calls[3].Messages.Last().Text.Contains(poem),
+                "The verification step did not receive the text and the new screenshot.");
+        });
+
+        await suite.Case("a Notepad workflow cannot claim that text was entered after inspection alone", async root =>
+        {
+            var blank = new WorkFrame(new(10, 10, 11, "Notepad", "Untitled", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var model = new WorkflowModel([Routing("chat", "standard")],
+                WorkStep("observe_window", new {}),
+                WorkStep(reply: "I wrote the poem in Notepad."));
+            await using var f = await Fixture.CreateAsync(root, model, workDesktop: new WorkDesktopStub(blank));
+            f.Config.Permissions.ScreenCapture = true;
+            await f.Engine.TryHandleAccessCommandAsync("/desktop on", default);
+            await f.Engine.RespondAsync(notepadRequest, "user", false, false, default);
+            Check.True(f.Output.Lines.Last().Contains("stopped before entering text"), "Inspection was reported as a completed edit.");
+        });
+
+        await suite.Case("the reported Paint request saves a verified PNG before opening it", async root =>
+        {
+            var opened = new List<string>();
+            var model = new ScriptedModel();
+            await using var f = await Fixture.CreateAsync(root, model, openSketch: path =>
+            {
+                var png = File.ReadAllBytes(path);
+                Check.True(png.Length > 1000 && png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+                    "Paint was given a missing or invalid PNG.");
+                opened.Add(path);
+                return true;
+            });
+            f.Config.Permissions.AllowAutonomousFileActions = false;
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await f.Engine.RespondAsync("Можешь нарисовать аниме лицо в Paint?", "user", false, false, default);
+            Check.Equal(0, model.Calls.Count);
+            Check.Equal(opened.Single(), Directory.GetFiles(Path.Combine(root, "documents", "evelyn-sketches"), "*.png").Single());
+            Check.True(f.Output.Lines.Any(line => line.StartsWith("[Plan]")) &&
+                f.Output.Lines.Last().Contains("verified that Paint opened"), "The work and its outcome were not reported.");
+            Check.True(!f.Output.Lines.Any(line => line.Contains("[Approval")), "Full access still requested approval.");
+        });
+
+        await suite.Case("the reported self-portrait request and affirmative follow-up both open verified drawings in Paint", async root =>
+        {
+            var opened = new List<string>();
+            var model = new WorkflowModel([]);
+            await using var f = await Fixture.CreateAsync(root, model, openSketch: path =>
+            {
+                Check.True(new FileInfo(path).Length > 1000, "The self-portrait was not written before opening Paint.");
+                opened.Add(path);
+                return true;
+            });
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await f.Engine.RespondAsync("Можешь попробовать нарисовать себя в Paint?\nКак ты себя представляешь", "user", false, false, default);
+            Check.Equal(1, opened.Count);
+            Check.True(f.Output.Lines.Last().Contains("Self-portrait by the window") &&
+                f.Output.Lines.Last().Contains("warm light catching one side of my hair"), "The portrait's description was missing.");
+            await f.Engine.RespondAsync("Да, нарисуй себя", "user", false, false, default);
+            Check.Equal(2, opened.Distinct().Count(), "The follow-up lost the Paint destination from the original request.");
+            Check.Equal(0, model.Calls.Count);
+            Check.Equal(2, f.Output.Lines.Count(line => line.StartsWith("[Plan]")));
+        });
+
+        await suite.Case("a drawing follow-up only inherits Paint from a matching owner request", async root =>
+        {
+            var opened = 0;
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openSketch: _ =>
+            {
+                opened++;
+                return true;
+            });
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await f.Memory.AppendAsync("user", "Try drawing yourself in Paint.", "guest");
+            await f.Engine.RespondAsync("Yes, draw yourself.", "user", false, false, default);
+            Check.Equal(0, opened, "Another speaker supplied the Paint destination.");
+            Check.Equal(1, Directory.GetFiles(Path.Combine(root, "documents", "evelyn-sketches"), "*.png").Length);
+        });
+
+        await suite.Case("a different drawing retries an invalid plan and keeps the PNG when Paint fails", async root =>
+        {
+            const string artwork = """
+                {"title":"Red Kite","background":"#FFFFFF","shapes":[
+                    {"kind":"polygon","color":"#CC3333","points":[[50,15],[75,38],[50,60],[25,38]]},
+                    {"kind":"rectangle","color":"#221133","x":49,"y":58,"w":2,"h":20},
+                    {"kind":"ellipse","color":"#3377BB","x":45,"y":76,"w":10,"h":8}]}
+                """;
+            var model = new ScriptedModel("{broken", artwork, """{"matches":false,"reason":"The kite is missing."}""",
+                artwork, """{"matches":true,"reason":"The kite and tail are visible."}""");
+            await using var f = await Fixture.CreateAsync(root, model, openSketch: _ => false);
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await f.Engine.RespondAsync("Draw a red kite in Paint", "user", false, false, default);
+            Check.Equal(5, model.Calls.Count);
+            Check.True(model.Calls[2].Messages.Last().Image is { Length: > 0 }, "The first rendered PNG was not reviewed.");
+            Check.True(model.Calls[3].Messages.Last().Text.Contains("The kite is missing"), "The failed review did not guide the next attempt.");
+            var png = Directory.GetFiles(Path.Combine(root, "documents", "evelyn-sketches"), "*.png").Single();
+            Check.True(f.Output.Lines.Last().Contains(png) && f.Output.Lines.Last().Contains("Paint could not be launched"),
+                "The reply lost the saved PNG or implied that Paint opened it.");
+        });
+
+        await suite.Case("drawing and launching Paint resume the same workflow after separate approvals", async root =>
+        {
+            var opened = new List<string>();
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openSketch: path =>
+            {
+                opened.Add(path);
+                return true;
+            });
+            var folder = Path.Combine(root, "documents", "evelyn-sketches");
+            await f.Engine.RespondAsync("Нарисуй аниме-лицо в Пэйнте.", "user", false, false, default);
+            Check.True(!Directory.Exists(folder) && f.Output.Lines.Any(line => line.Contains("[Approval 1] render_sketch")),
+                "A drawing was created before its approval.");
+            await f.Engine.ApproveAsync(1, default);
+            var png = Directory.GetFiles(folder, "*.png").Single();
+            Check.True(opened.Count == 0 && f.Output.Lines.Any(line => line.Contains("[Approval 2] open_sketch")),
+                "Paint launched before its approval.");
+            await f.Engine.ApproveAsync(2, default);
+            Check.Equal(png, opened.Single());
+        });
+
+        await suite.Case("ordinary chat rejects unsupported claims of desktop activity before speaking", async root =>
+        {
+            var model = new ScriptedModel("I've opened Paint and drafted a sketch.",
+                "I've got the brush ready and I'm thinking about the light.", "I'm drafting this right before our eyes.");
+            Check.True(ReplyQuality.ClaimsComputerAction("I'll open Paint right now and start sketching on your screen."),
+                "A promise to open Paint escaped the guard.");
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Engine.RespondAsync("Would a digital doodle cheer you up?", "user", false, false, default);
+            Check.Equal(3, model.Calls.Count);
+            Check.True(f.Output.Lines.Last().Contains("couldn't start a computer action") &&
+                !f.Output.Lines.Any(ReplyQuality.ClaimsComputerAction), "An unsupported computer action claim reached the console.");
         });
 
         await suite.Case("work checkpoints persist, ask which task to resume and deliver a saved reminder once", async root =>
@@ -754,7 +914,7 @@ internal static class EngineTests
             f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
             await f.Engine.RespondAsync("Что думаешь об этой фотографии?","user",false,false,default);
             var messages=model.Calls.Single().Messages;
-            Check.True(messages[0].Text.Contains("calm, curious fictional neighbour")&&messages[0].Text.Contains("Evolving habits and interests"),"Visual replies did not use the character's voice.");
+            Check.True(messages[0].Text.Contains("calm, curious fictional neighbour")&&messages[0].Text.Contains("Evolving habits, interests and tastes"),"Visual replies did not use the character's voice.");
             Check.True(messages[0].Text.Contains("give your own take")&&messages.Last().Image is [1,2,3],"The opinion request was not grounded in the actual image.");
             Check.True(f.Output.Lines.Last().EndsWith(opinion+" I'd keep that lighting."),"The visual reaction did not stop after the personal thought.");
         });

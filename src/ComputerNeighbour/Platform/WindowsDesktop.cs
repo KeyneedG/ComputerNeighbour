@@ -93,8 +93,41 @@ public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDeskt
         EnsureWindows();
         var existing=Process.GetProcessesByName("mspaint");
         foreach(var process in existing)process.Dispose();
+        return existing.Length==0&&LaunchPaint(image);
+    }
+
+    internal static async Task<(bool Launched, bool Verified)> OpenPaintDocumentAsync(string image,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!LaunchPaint(image)) return (false, false);
+        var filename = Path.GetFileNameWithoutExtension(image);
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < TimeSpan.FromSeconds(8))
+        {
+            var processes = Process.GetProcessesByName("mspaint");
+            try
+            {
+                foreach (var process in processes)
+                {
+                    try
+                    {
+                        if (process.MainWindowTitle.Contains(filename, StringComparison.OrdinalIgnoreCase))
+                            return (true, true);
+                    }
+                    catch (InvalidOperationException) { }
+                }
+            }
+            finally { foreach (var process in processes) process.Dispose(); }
+            await Task.Delay(250, ct);
+        }
+        return (true, false);
+    }
+
+    private static bool LaunchPaint(string image)
+    {
+        EnsureWindows();
         var exe=Path.Combine(Environment.SystemDirectory,"mspaint.exe");
-        if(existing.Length>0||!File.Exists(exe))return false;
+        if(!File.Exists(exe))return false;
         var start=new ProcessStartInfo(exe){UseShellExecute=false};
         start.ArgumentList.Add(image);
         using var paint=Process.Start(start);

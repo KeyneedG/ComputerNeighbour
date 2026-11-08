@@ -59,9 +59,13 @@ internal static class TurnPlanner
         var subject=activity.Success?request[activity.Index..]:request;
         var desktopTarget=Regex.IsMatch(subject,@"\b(?:on (?:my|the|this) (?:pc|computer|screen|desktop)|my screen)\b|на (?:экране|компьютере|пк)",IgnoreCase);
         var canObserve=PermitsDesktopObservation(request)&&(desktopTarget||!OffScreenActivity.IsMatch(subject));
+        if(allowWork&&DrawingRequest.Parse(request) is not null)
+            return new(TurnIntent.Work,AllowIncidentalScreen:canObserve,Effort:WorkEffort.Standard);
         var explicitTool=IntentRouter.Resolve(input,config.Permissions,config.CharacterName);
-        var compound=WorkRequest.IsCompound(request)&&(explicitTool is null||!ToolRegistry.IsFileChange(explicitTool));
-        if(allowWork&&(forceWork||compound||WorkRequest.IsDesktopAction(request)))
+        var explicitFileChange=explicitTool is not null&&ToolRegistry.IsFileChange(explicitTool);
+        var compound=!explicitFileChange&&WorkRequest.IsCompound(request);
+        if(allowWork&&(forceWork||compound||!explicitFileChange&&WorkRequest.IsDesktopAction(request)||
+            explicitTool is null&&WorkRequest.IsFileWrite(request)))
             return await RefineKnownAsync(new(TurnIntent.Work,AllowIncidentalScreen:canObserve,Effort:compound?WorkEffort.Deep:WorkEffort.Standard));
         if(canObserve&&activity.Success)return await RefineKnownAsync(new(TurnIntent.Screen));
         if(Regex.IsMatch(request,@"(?:^see\s+(?:my|the)\s+(?:screen|desktop)[?.!\s]*$|\b(?:did you|you (?:can|could|did)|can (?:really |actually )?see)\b.{0,50}\b(?:screen|screenshot|desktop|what I'm doing)\b|(?:вс[её].таки|действительно|правда|ты (?:же )?видела).{0,85}(?:экран|снимок|скрин|что я делаю)|(?:экран|снимок|скрин).{0,50}(?:галлюцин|выдумал))",IgnoreCase)

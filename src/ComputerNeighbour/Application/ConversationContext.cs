@@ -19,6 +19,7 @@ public static class ConversationContext
                 // Keep the last occurrence in the model context; preserve the full ledger on disk.
                 if(dialogue.Skip(index+1).Any(e=>e.Role=="assistant"&&ReplyQuality.IsRepeated(entry.Text,e.Text)))continue;
                 if(ReplyQuality.IsEmptyOffer(entry.Text))continue;
+                if(ReplyQuality.ClaimsComputerAction(entry.Text))continue;
                 messages.Add(new("assistant",entry.Text,IsHistory:true));
             }
             else
@@ -102,6 +103,21 @@ public static class ReplyQuality
             ||Regex.IsMatch(answer,@"(?:^|[.!?]\s+)(?:right now[,\s]+)?"+display+@"\s+(?:shows|displays|is showing)\b",RegexOptions.IgnoreCase)
             ||Regex.IsMatch(answer,@"\bI (?:can see|see)\b[^.!?\r\n]{0,100}\bon "+display+@"\b|\bI (?:just |now )?(?:captured|checked|took a screenshot of|looked at) "+display+@" (?:just now|for this|now)\b|\bI just (?:captured|checked|looked at) "+display+@"\b",RegexOptions.IgnoreCase)
             ||Regex.IsMatch(answer,@"(?:^|[.!?]\s+)(?:(?:that|this|it) (?:looks|appears)|(?:the|your) (?:preview|render|image|photo|lighting|shadows?|skin tones?) (?:looks?|appears?|is|are))\s+(?:(?:a bit|a little|much|slightly|noticeably)\s+)?(?:lighter|darker|brighter|dimmer|sharper|blurrier|softer|clearer)\b[^.!?\r\n]{0,100}\b(?:now|this time)\b",RegexOptions.IgnoreCase);
+    }
+
+    internal static bool ClaimsComputerAction(string answer)
+    {
+        const string firstPerson = @"\bI(?:['’]ll| will|['’]m(?: going to)?| am(?: going to)?)\s+(?:(?:now|just|currently|go ahead and|start)\s+)*";
+        const string computerTarget = @"(?:file|folder|document|app(?:lication)?|window|browser|tab|notepad|paint|calculator|canvas|screen|desktop|cursor|clipboard)";
+        const string appTarget = @"\s+(?:up\s+)?(?:(?:the|your|a|an|new)\s+)*(?:" + computerTarget + @"|(?-i:[A-Z][\p{L}\p{N}.-]+))\b";
+        const RegexOptions ignoreCase = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+        return Regex.IsMatch(answer, firstPerson +
+            @"(?:(?:open(?:ing)?|launch(?:ing)?|switch(?:ing)? to)" + appTarget +
+            @"|(?:sav(?:e|ing)|writ(?:e|ing)|typ(?:e|ing)|edit(?:ing)?|creat(?:e|ing)|draw(?:ing)?|sketch(?:ing)?|click(?:ing)?|mov(?:e|ing)|press(?:ing)?)\b[^.!?\r\n]{0,100}\b" + computerTarget + @"\b)",
+            ignoreCase) ||
+            Regex.IsMatch(answer, @"\bI(?:['’]ve| have)?\s+(?:(?:just|already|successfully)\s+)*(?:opened|launched|switched to)" + appTarget, ignoreCase) ||
+            Regex.IsMatch(answer, @"\bI(?:['’]ve got| have)\s+(?:the|my|a)\s+(?:drawing\s+)?brush ready\b|" +
+                @"\bI(?:['’]m| am)\s+(?:drafting|drawing|sketching)\b[^.!?\r\n]{0,70}\b(?:right before (?:our|your) eyes|in front of you)\b", ignoreCase);
     }
 
     public static bool DeniesToolAccess(string answer,bool screen,bool files,bool web)

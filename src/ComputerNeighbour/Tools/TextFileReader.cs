@@ -102,7 +102,7 @@ internal sealed class TextFileReader(PortablePaths paths,PermissionOptions permi
     }
 
     private static bool Within(string path,string root)=>path.StartsWith(Path.TrimEndingDirectorySeparator(root)+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase);
-    private static void EnsureNoLinks(string path)
+    internal static void EnsureNoLinks(string path)
     {
         for(var current=path;current is not null;current=Path.GetDirectoryName(current))
             if((Directory.Exists(current)||File.Exists(current))&&File.GetAttributes(current).HasFlag(FileAttributes.ReparsePoint))

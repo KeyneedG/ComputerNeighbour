@@ -110,7 +110,9 @@ public sealed partial class WindowsDesktop
     void IWorkDesktop.Type(WorkFrame frame, string text)
     {
         CheckWorkWindow(frame);
-        var inputs = text.SelectMany(ch => new[] { KeyInput(0, ch, 0x0004), KeyInput(0, ch, 0x0004 | 0x0002) }).ToArray();
+        // A Unicode carriage return is the character delivered to an editor for Enter.
+        var inputs = text.ReplaceLineEndings("\r").SelectMany(ch =>
+            new[] { KeyInput(0, ch, 0x0004), KeyInput(0, ch, 0x0004 | 0x0002) }).ToArray();
         CheckWorkWindow(frame);
         Send(inputs);
     }

@@ -31,6 +31,7 @@ public sealed record EmotionState
     public string LastReason { get; init; } = "Initial character temperament";
     public IReadOnlyList<CharacterTrait> Traits { get; init; } = [];
     public NeedLevels Needs { get; init; } = new();
+    internal RecentReaction? Reaction { get; init; }
 }
 
 /// <summary>Persistent simulated characterization, not claims of human feelings.</summary>
@@ -128,7 +129,20 @@ public sealed class EmotionEngine
         finally{_gate.Release();}
     }
 
-    public async Task ApplyAsync(EmotionDelta? delta, CancellationToken cancellationToken = default,CharacterGrowthUpdate? growth=null,string? observedUserText=null,string? completedReply=null)
+    internal RecentReaction? ActiveReaction(DateTimeOffset now)
+    {
+        var state = State;
+        return state.Reaction is { } reaction && reaction.IsFresh(now, state.Interactions) ? reaction : null;
+    }
+
+    internal async Task ClearReactionAsync(CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try { Volatile.Write(ref _state, _state with { Reaction = null }); }
+        finally { _gate.Release(); }
+    }
+
+    public async Task ApplyAsync(EmotionDelta? delta, CancellationToken cancellationToken = default,CharacterGrowthUpdate? growth=null,string? observedUserText=null,string? completedReply=null,ReactionUpdate? reaction=null)
     {
         if (!_initialized) throw new InvalidOperationException("Initialize personality before using it.");
         await _gate.WaitAsync(cancellationToken);
@@ -136,8 +150,13 @@ public sealed class EmotionEngine
         {
             var current = _state;
             delta ??= new EmotionDelta();
-            var hours = Math.Clamp((DateTimeOffset.UtcNow - current.UpdatedAt).TotalHours, 0, 720);
+            var now = DateTimeOffset.UtcNow;
+            var hours = Math.Clamp((now - current.UpdatedAt).TotalHours, 0, 720);
             var relaxation = 1 - Math.Exp(-hours / 12);
+            var observed = RecentReaction.From(reaction, observedUserText, completedReply, now, current.Interactions + 1);
+            // Repeating the same subject does not keep its aftertaste alive indefinitely.
+            var recent = observed is not null && !observed.Detail.Equals(current.Reaction?.Detail, StringComparison.OrdinalIgnoreCase)
+                ? observed : current.Reaction;
             var next = current with
             {
                 Warmth = Clamp01(current.Warmth + Bound(delta.Warmth, 0.04)),
@@ -148,8 +167,9 @@ public sealed class EmotionEngine
                 Stress = Clamp01(current.Stress * (1 - relaxation * 0.65) + Bound(delta.Stress, 0.1)),
                 Curiosity = Clamp01(current.Curiosity + Bound(delta.Curiosity, 0.08)),
                 Interactions = current.Interactions + 1,
-                UpdatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = now,
                 Traits = CharacterGrowth.Apply(current.Traits,growth,observedUserText,completedReply),
+                Reaction = recent is not null && recent.IsFresh(now, current.Interactions + 1) ? recent : null,
                 LastReason = string.IsNullOrWhiteSpace(delta.Reason) ? current.LastReason : delta.Reason[..Math.Min(delta.Reason.Length, 300)]
             };
             await SaveAsync(next, cancellationToken);
@@ -159,7 +179,8 @@ public sealed class EmotionEngine
     }
 
     public string Status => string.Create(CultureInfo.InvariantCulture,
-        $"warmth={State.Warmth:F2}, trust={State.Trust:F2}, closeness={State.Closeness:F2}, mood={State.Valence:F2}, energy={State.Energy:F2}, stress={State.Stress:F2}, curiosity={State.Curiosity:F2}; interactions={State.Interactions}");
+        $"warmth={State.Warmth:F2}, trust={State.Trust:F2}, closeness={State.Closeness:F2}, mood={State.Valence:F2}, energy={State.Energy:F2}, stress={State.Stress:F2}, curiosity={State.Curiosity:F2}; interactions={State.Interactions}") +
+        (ActiveReaction(DateTimeOffset.UtcNow) is { } reaction ? $"\nRecent feeling: {reaction.Feelings}" : "");
 
     private static double Bound(double value, double limit) => double.IsFinite(value) ? Math.Clamp(value, -limit, limit) : 0;
     private static double Clamp01(double value) => Math.Clamp(value, 0, 1);
