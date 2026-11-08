@@ -13,6 +13,9 @@ public sealed class MemoryOptions
 
 public sealed record MemoryEntry(DateTimeOffset At, string Role, string Text, string SpeakerId = "user");
 
+internal enum WorkArtifactKind { Image, TextFile, EditorText }
+internal sealed record WorkArtifact(WorkArtifactKind Kind, string Path, string Goal, string SpeakerId, bool OpenInPaint = false);
+
 internal sealed record WorkTask(string Title, string Goal, string Progress, string NextStep,
     IReadOnlyList<string> References, DateTimeOffset? ReminderAt = null);
 
@@ -96,6 +99,7 @@ public sealed class MemoryStore
 
     public string Summary => Volatile.Read(ref _state).Summary;
     internal WorkTaskState Tasks => Volatile.Read(ref _state).Tasks;
+    internal WorkArtifact? LastArtifact => Volatile.Read(ref _state).LastArtifact;
     public DateTimeOffset LastCompactedAt => Volatile.Read(ref _state).LastCompactedAt;
     public int StoredCharacters => Volatile.Read(ref _state).Recent.Sum(e => e.Text.Length);
     public string? RecoveryNotice { get; private set; }
@@ -184,6 +188,19 @@ public sealed class MemoryStore
             await SaveStateAsync(next, ct);
             Volatile.Write(ref _state, next);
             return true;
+        }
+        finally { _gate.Release(); }
+    }
+
+    internal async Task SaveArtifactAsync(WorkArtifact artifact, CancellationToken ct)
+    {
+        EnsureInitialized();
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var next = _state with { LastArtifact = artifact };
+            await SaveStateAsync(next, ct);
+            Volatile.Write(ref _state, next);
         }
         finally { _gate.Release(); }
     }
@@ -333,5 +350,6 @@ public sealed class MemoryStore
         public DateTimeOffset LastCompactedAt { get; init; } = DateTimeOffset.UtcNow;
         public List<MemoryEntry> Recent { get; init; } = [];
         public WorkTaskState Tasks { get; init; } = new([]);
+        public WorkArtifact? LastArtifact { get; init; }
     }
 }

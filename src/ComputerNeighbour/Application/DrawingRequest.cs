@@ -43,10 +43,15 @@ internal sealed record DrawingRequest(string Subject, bool OpenInPaint, string? 
         var subject = command.Groups["subject"].Value;
         if (Regex.IsMatch(subject, @"^(?:a\s+)?(?:conclusion|parallel|comparison|distinction|breath|attention)\b|\b(?:ascii|in text|текстом)\b", IgnoreCase))
             return null;
-        var open = (command.Groups["paint"].Success || PaintDestination.IsMatch(subject)) && !NoLaunch.IsMatch(request);
-        string? limitation = UnsupportedCanvas.IsMatch(request)
+        return FromBrief(subject, request, command.Groups["paint"].Success);
+    }
+
+    internal static DrawingRequest FromBrief(string subject, string authority, bool startsWithPaint = false)
+    {
+        var open = (startsWithPaint || PaintDestination.IsMatch(authority)) && !NoLaunch.IsMatch(authority);
+        string? limitation = UnsupportedCanvas.IsMatch(authority)
             ? "My drawing workflow renders a new PNG. It needs permission to save a file and cannot draw directly on the existing canvas."
-            : OtherEditor.IsMatch(request)
+            : OtherEditor.IsMatch(authority)
                 ? "I can render a PNG and open it in Paint. This drawing workflow does not control the requested editor."
                 : null;
         subject = PaintDestination.Replace(subject, "").Trim(' ', ',', '.', '?', '!');

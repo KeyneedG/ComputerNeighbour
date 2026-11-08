@@ -159,7 +159,7 @@ public static class Program
                                     else ui.Write("Type /forget CONFIRM to erase conversation memory, saved tasks and LoRA training data for the current session.");
                                     break;
                                 case "/task":case "/tasks": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
-                                case "/work": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
+                                case "/work":case "/google": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
                                 case "/look": await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -298,6 +298,7 @@ public static class Program
     Type a message in English or Russian. Evelyn answers in English.
     Hold F10 (configurable) to record; release to transcribe. Ctrl+C or /exit to quit.
     /look          Analyse current screen
+    /google QUESTION  Select a screen region and search it in Google AI Mode in Chrome
     /browser       Read and summarise the current/last active browser tab
     /read TARGET   Read a public URL or a text filename/path
     /search QUERY  Search the live internet, read results and show source URLs

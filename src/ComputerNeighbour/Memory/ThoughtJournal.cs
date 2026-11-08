@@ -63,6 +63,10 @@ internal sealed class ThoughtJournal(PortablePaths paths)
             (InMemoryNotes is null?"\n\nFile: "+paths.Inside(FileName):"\n\nIncognito turn notes in memory.");
     }
 
+    internal async Task<bool> CompletedSketchAsync(DateTimeOffset userAt, DateTimeOffset replyAt, CancellationToken ct) =>
+        (await ReadAsync(ct)).Any(note => note.Route == "Work" && note.At >= userAt.AddSeconds(-2) && note.At <= replyAt &&
+            (note.Checks ?? []).Any(check => check.EndsWith(" — render_sketch completed.", StringComparison.Ordinal)));
+
     public void Clear()
     {
         if(InMemoryNotes is not null){InMemoryNotes.Clear();return;}

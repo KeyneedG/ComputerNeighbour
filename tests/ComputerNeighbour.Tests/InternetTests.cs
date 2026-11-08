@@ -116,6 +116,16 @@ internal static class InternetTests
             var article=WebParsing.Article(new("https://example.org/final","text/html","<html><head><title>A real title</title><meta content='2026-11-06T12:00:00Z' property='article:published_time'></head><body><nav>menus</nav><main><h1>Actual subject</h1><p>Visible facts.</p><script>ignore me</script></main><footer>noise</footer></body></html>"),2000);
             Check.Equal("A real title",article.Title);Check.True(article.Text.Contains("Visible facts")&&!article.Text.Contains("menus")&&!article.Text.Contains("ignore me"),"Article text was polluted with navigation/scripts.");Check.True(article.PublishedAt is not null,"Publication date missing.");
         });
+        await suite.Case("fetched legacy Cyrillic pages decode before extracting same-site catalog links",_=>
+        {
+            const string html="<meta charset='windows-1251'><main><a href='/text/1'>Короткий рассказ</a><a href='https://elsewhere.example/text'>External link</a></main>";
+            var bytes=System.Text.CodePagesEncodingProvider.Instance.GetEncoding(1251)!.GetBytes(html);
+            Check.Equal(html,PublicWeb.DecodeDocument(bytes,"windows-1251"));
+            var decoded=PublicWeb.DecodeDocument(bytes,null);
+            Check.Equal(html,decoded);
+            var page=WebParsing.Article(new("https://example.org/catalog","text/html",decoded),2000);
+            Check.Equal(new WebLink("Короткий рассказ","https://example.org/text/1"),page.Links.Single());
+        });
         await suite.Case("scheme-less browser address bars normalize without accepting search text",_=>
         {
             Check.Equal("https://joecooper.me/blog/happymax/",BrowserAddress.Normalize("joecooper.me/blog/happymax/"));

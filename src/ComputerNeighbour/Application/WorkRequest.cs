@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using ComputerNeighbour.Memory;
 using ComputerNeighbour.Tools;
 
 namespace ComputerNeighbour.Application;
@@ -20,7 +21,7 @@ internal sealed class WorkRequest
     private const string UiEdit = @"(?:choose|select|toggle|dismiss|close (?:the )?dialog|выбери|включи|выключи|закрой диалог)";
     private static readonly Regex WindowEdit = new(
         @"^(?:(?:in|в)\s+[^,\r\n]{1,45}\s+)?" + UiEdit + @"\b", IgnoreCase);
-    private const string WebSearchWord = @"\b(?:search (?:the web|online)|look up|google|find online|on the (?:web|internet))\b|(?:в интернете|в сети|онлайн|погугли)";
+    private const string WebSearchWord = @"\b(?:search (?:the web|online)|look up|google|find online|on the (?:web|internet))\b|(?:в интернете|в сети|онлайн|(?:за|по)гугли)";
     private const string Sequence = @"\b(?:and then|and|then|after that|затем|потом|после этого|и)\s+(?=(?:" +
         Edit + "|" + Input + "|" + Open + "|" + Read + @")\b)";
     private static readonly Regex Files = new(
@@ -44,50 +45,86 @@ internal sealed class WorkRequest
     private static readonly Regex NoInput = new(
         @"\b(?:do not|don['’]t|never)\s+(?:click|type|press|scroll|touch|interact)|не\s+(?:кликай|нажимай|вводи|печатай|прокручивай|управляй)|без\s+(?:кликов|ввода)", IgnoreCase);
     private static readonly Regex NoWeb = new(
-        @"\b(?:offline|no (?:internet|web)|without (?:the )?(?:internet|web)|do not browse|don['’]t browse)\b|без\s+(?:интернета|сети)|не\s+(?:выходи в интернет|ищи в интернете|открывай ссылк\p{L}*)", IgnoreCase);
+        @"\b(?:offline|no (?:internet|web)|without (?:the )?(?:internet|web)|(?:do not|don['’]t|never) (?:browse|search|google|look (?:it up|up)))\b|без\s+(?:интернета|сети)|не\s+(?:выходи в интернет|ищи|поискать|гугли|погугли|загугли\p{L}*|открывай ссылк\p{L}*)\b", IgnoreCase);
 
-    internal WorkRequest(string goal, string previous, bool screenAllowed)
+    internal static string WithoutQuotedText(string text) => QuotedText.Replace(text, match => new string(' ', match.Length));
+    internal static bool PermitsWebLookup(string text) => !NoWeb.IsMatch(WithoutQuotedText(text));
+
+    internal WorkRequest(string goal, string previous, bool screenAllowed, SemanticWork? semantic = null, WorkArtifact? revision = null)
     {
         Goal = goal;
-        var confirmsPrior = Followup.IsMatch(goal);
+        Revision = revision;
+        var confirmsPrior = Followup.IsMatch(goal) || semantic?.ContinuesPrevious == true;
+        var authority = semantic?.ContinuesPrevious == true ? previous : goal;
+        RequestsSynthesis = Regex.IsMatch(authority,@"\b(?:summari[sz]e|summary|draft|synthesis|overview)\b|\b(?:сводк\p{L}*|перескаж\p{L}*|резюме|обзор|сочини)\b",IgnoreCase);
+        RequestsCatalog = Regex.IsMatch(authority,@"\b(?:catalog(?:ue)?|bibliograph\w*|list of (?:works|publications))\b|\b(?:каталог\p{L}*|библиограф\p{L}*|список произведений)\b",IgnoreCase);
+        CopySourceText = semantic?.Includes("copy_text") == true;
         var refersBack = confirmsPrior || Regex.IsMatch(goal, @"\b(?:it|that|this|there|here|это|его|е[её]|там|здесь)\b", IgnoreCase);
         PriorSubject = refersBack ? previous : "";
         Drawing = DrawingRequest.Parse(goal, previous) ?? (confirmsPrior ? DrawingRequest.Parse(PriorSubject) : null);
+        if (Drawing is null && semantic?.Includes("draw") == true && semantic.DrawingSubject.Length > 0)
+            Drawing = DrawingRequest.FromBrief(semantic.DrawingSubject, authority);
         var subject = Goal + "\n" + PriorSubject;
         var currentFiles = FileNames(goal);
         NamedFiles = currentFiles.Length > 0 ? currentFiles : FileNames(PriorSubject);
-        ReadFiles = NamedFiles.Length > 0 || Regex.IsMatch(WebUrl.Replace(subject, ""), FileWord, IgnoreCase);
-        var execution = IsExecution(goal);
-        var actions = execution && !NoChanges.IsMatch(goal) && (HasVerb(goal, Edit) || !NoChanges.IsMatch(PriorSubject));
-        WriteInNotepad = IsNotepadWrite(goal);
-        WriteFiles = actions && ReadFiles && (WantsFileChange(goal) ||
+        var fileSubject = NamedFiles.Length > 0 || Regex.IsMatch(WebUrl.Replace(subject, ""), FileWord, IgnoreCase);
+        var semanticFiles = semantic?.Includes("write_file") == true &&
+            (semantic.Includes("desktop_input") == false || fileSubject);
+        ReadFiles = semantic?.Includes("read_file") == true || semanticFiles || fileSubject;
+        var execution = semantic is not null || IsExecution(goal);
+        var actions = execution && !NoChanges.IsMatch(authority) && (HasVerb(goal, Edit) || !NoChanges.IsMatch(PriorSubject));
+        WriteInNotepad = IsNotepadWrite(authority) || semantic?.Includes("desktop_input") == true &&
+            Regex.IsMatch(authority, @"\b(?:notepad|блокнот\p{L}*|text editor|текстов\p{L}* редактор\p{L}*)\b", IgnoreCase);
+        WriteFiles = actions && ReadFiles && (semanticFiles || WantsFileChange(goal) ||
             confirmsPrior && (HasVerb(goal, Edit) || WantsFileChange(PriorSubject)) ||
             PriorSubject.Length > 0 && Regex.IsMatch(goal, @"\b" + Edit + @"\s+(?:it|that|это|его|е[её])\b", IgnoreCase));
         if (WriteFiles)
         {
-            var pathText = WebUrl.Replace(goal, "");
+            var pathText = WebUrl.Replace(authority, "");
             var folder = OutputFolder.Match(pathText);
             if (!folder.Success) folder = OutputPathWithSeparator.Match(pathText);
             if (folder.Success) DestinationFolder = folder.Groups["path"].Value.TrimEnd('/', '\\');
         }
-        OpenApps = actions && (WriteInNotepad || HasVerb(goal, Open) || confirmsPrior && HasVerb(PriorSubject, Open)) &&
-            (!WriteInNotepad || !NoLaunch.IsMatch(goal));
+        OpenApps = actions && !NoLaunch.IsMatch(authority) &&
+            (semantic?.Includes("open_app") == true || WriteInNotepad || HasVerb(goal, Open) || confirmsPrior && HasVerb(PriorSubject, Open));
         var windowSubject = Regex.IsMatch(subject, WindowWord, IgnoreCase);
-        DesktopInput = actions && !NoInput.IsMatch(subject) && (WriteInNotepad || HasVerb(goal, Input) || HasVerb(goal, Focus) ||
+        DesktopInput = actions && !NoInput.IsMatch(subject) && (semantic?.Includes("desktop_input") == true || WriteInNotepad || HasVerb(goal, Input) || HasVerb(goal, Focus) ||
             confirmsPrior && (HasVerb(PriorSubject, Input) || HasVerb(PriorSubject, Focus)) || windowSubject && HasVerb(goal, UiEdit));
         ObserveWindow = screenAllowed && TurnPlanner.PermitsDesktopObservation(PriorSubject) && (DesktopInput || windowSubject);
         var canReadOnline = execution && !NoWeb.IsMatch(subject);
-        ReadBrowser = canReadOnline && Regex.IsMatch(subject, @"\b(?:browser|tab)\b|браузер|вкладк", IgnoreCase);
-        SearchClauses = canReadOnline ? new[] { goal, PriorSubject }.SelectMany(text => Regex.Split(text, Sequence, IgnoreCase))
-            .Where(clause => Regex.IsMatch(clause, WebSearchWord, IgnoreCase)).ToArray() : [];
+        ReadBrowser = canReadOnline && (semantic?.Includes("read_browser") == true || Regex.IsMatch(subject, @"\b(?:browser|tab)\b|браузер|вкладк", IgnoreCase));
+        SearchClauses = !canReadOnline ? [] :
+            semantic?.Includes("search_web") == true && Regex.IsMatch(QuotedText.Replace(authority, ""), WebSearchWord, IgnoreCase)
+                ? [authority]
+                : new[] { goal, PriorSubject }.SelectMany(text => Regex.Split(text, Sequence, IgnoreCase))
+                    .Where(clause => Regex.IsMatch(clause, WebSearchWord, IgnoreCase)).ToArray();
         Urls = canReadOnline ? WebUrl.Matches(subject).Select(m => m.Value.TrimEnd('.', ',', ')', ']', '!', '?')).ToArray() : [];
+        if (revision is not null && !NoChanges.IsMatch(goal))
+        {
+            if (revision.Kind == WorkArtifactKind.Image)
+                Drawing = DrawingRequest.FromBrief(revision.Goal,goal,revision.OpenInPaint);
+            else if (revision.Kind == WorkArtifactKind.TextFile)
+            {
+                ReadFiles = WriteFiles = true;
+                NamedFiles = [revision.Path];
+                DestinationFolder = Path.IsPathFullyQualified(revision.Path) ? Path.GetDirectoryName(revision.Path) : null;
+            }
+            else if (!NoLaunch.IsMatch(goal))
+            {
+                WriteInNotepad = OpenApps = true;
+            }
+        }
     }
 
     internal string Goal { get; }
+    internal WorkArtifact? Revision { get; }
     internal string PriorSubject { get; }
     internal DrawingRequest? Drawing { get; }
     internal bool ReadFiles { get; }
     internal bool WriteFiles { get; }
+    internal bool CopySourceText { get; }
+    internal bool RequestsSynthesis { get; }
+    internal bool RequestsCatalog { get; }
     internal string? DestinationFolder { get; }
     internal bool WriteInNotepad { get; }
     internal bool OpenApps { get; }
@@ -95,6 +132,7 @@ internal sealed class WorkRequest
     internal bool ObserveWindow { get; }
     internal bool ReadBrowser { get; }
     internal bool SearchWeb => SearchClauses.Length > 0;
+    internal string SearchAuthority => string.Join("\n", SearchClauses);
     private string[] SearchClauses { get; }
     internal string[] Urls { get; }
     internal string[] NamedFiles { get; }
@@ -108,6 +146,16 @@ internal sealed class WorkRequest
         WindowEdit.IsMatch(request) && Regex.IsMatch(request, WindowWord, IgnoreCase);
 
     internal static bool IsCompound(string request) => IsExecution(request) && Regex.IsMatch(request, Sequence, IgnoreCase);
+
+    internal static bool HasMutationClause(string request) =>
+        Regex.Split(WithoutQuotedText(request), @"[,;.!?]|\b(?:and|then|и|затем|потом)\b", IgnoreCase)
+            .Any(clause => Regex.IsMatch(IntentRouter.CommandText(clause), "^(?:"+Edit+"|"+Input+"|"+Open+"|"+UiEdit+@")\b", IgnoreCase));
+
+    internal static bool IsShortConsent(string request) => Followup.IsMatch(request.Trim()) ||
+        Regex.IsMatch(request.Trim(), @"^(?:давай|да|хорошо|yes|okay|ok)[.!?]*$", IgnoreCase);
+
+    internal static bool IsAdvice(string request) => Regex.IsMatch(request,
+        @"^(?:how (?:do|can|should|could) I\b|how to\b|what (?:is|does)\b|why\b|explain\b|как (?:мне|самостоятельно)\b|как\s+(?:открыть|запустить|написать|сделать)\b|почему\b|что такое\b|объясни\b)", IgnoreCase);
 
     internal static bool IsFileWrite(string request) =>
         Regex.IsMatch(request, "^" + Edit + @"\b", IgnoreCase) && !NoChanges.IsMatch(request) && WantsFileChange(request);
@@ -125,6 +173,10 @@ internal sealed class WorkRequest
                 !expected.Contains('/') && normalized.EndsWith("/" + expected, StringComparison.OrdinalIgnoreCase);
         });
     }
+
+    internal static bool CompatibleArtifactTarget(string request,string path) => FileNames(request).All(named =>
+        named.Replace('\\','/').Equals(path.Replace('\\','/'),StringComparison.OrdinalIgnoreCase) ||
+        !named.Contains('/') && !named.Contains('\\') && named.Equals(Path.GetFileName(path),StringComparison.OrdinalIgnoreCase));
 
     internal bool AllowsSearchQuery(string query) => query.Length is >= 2 and <= 300 &&
         !query.Any(char.IsControl) && SearchClauses.Any(clause => clause.Contains(query, StringComparison.OrdinalIgnoreCase));

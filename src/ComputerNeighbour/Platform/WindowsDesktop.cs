@@ -100,11 +100,16 @@ public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDeskt
     {
         ct.ThrowIfCancellationRequested();
         if (!LaunchPaint(image)) return (false, false);
-        var filename = Path.GetFileNameWithoutExtension(image);
+        return (true,await WaitForDocumentWindowAsync("mspaint",image,ct));
+    }
+
+    private static async Task<bool> WaitForDocumentWindowAsync(string processName,string path,CancellationToken ct)
+    {
+        var filename = Path.GetFileNameWithoutExtension(path);
         var elapsed = Stopwatch.StartNew();
         while (elapsed.Elapsed < TimeSpan.FromSeconds(8))
         {
-            var processes = Process.GetProcessesByName("mspaint");
+            var processes = Process.GetProcessesByName(processName);
             try
             {
                 foreach (var process in processes)
@@ -112,7 +117,7 @@ public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDeskt
                     try
                     {
                         if (process.MainWindowTitle.Contains(filename, StringComparison.OrdinalIgnoreCase))
-                            return (true, true);
+                            return true;
                     }
                     catch (InvalidOperationException) { }
                 }
@@ -120,7 +125,7 @@ public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDeskt
             finally { foreach (var process in processes) process.Dispose(); }
             await Task.Delay(250, ct);
         }
-        return (true, false);
+        return false;
     }
 
     private static bool LaunchPaint(string image)
@@ -128,10 +133,15 @@ public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDeskt
         EnsureWindows();
         var exe=Path.Combine(Environment.SystemDirectory,"mspaint.exe");
         if(!File.Exists(exe))return false;
-        var start=new ProcessStartInfo(exe){UseShellExecute=false};
-        start.ArgumentList.Add(image);
-        using var paint=Process.Start(start);
-        return paint is not null;
+        return StartDocument(exe,image);
+    }
+
+    private static bool StartDocument(string executable,string path)
+    {
+        var start=new ProcessStartInfo(executable){UseShellExecute=false};
+        start.ArgumentList.Add(path);
+        using var process=Process.Start(start);
+        return process is not null;
     }
 
     public bool IsKeyDown(int virtualKey) => OperatingSystem.IsWindows() && (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
@@ -205,12 +215,15 @@ public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDeskt
         Send(inputs);
     }
 
-    public void OpenAllowedApp(string executable)
+    public void OpenAllowedApp(string executable) => _ = LaunchAllowedApp(executable);
+
+    private int? LaunchAllowedApp(string executable)
     {
         EnsureWindows();
         // The caller resolves an explicitly allowlisted executable. Never pass this to a shell.
         if (string.IsNullOrWhiteSpace(executable) || executable.IndexOfAny(['\r', '\n']) >= 0) throw new ArgumentException("Invalid application path.");
-        Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false });
+        using var launched = Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false });
+        return launched?.Id;
     }
 
     private bool IsExcluded(string title) => (options.ExcludedWindowTitles ?? []).Any(x => !string.IsNullOrWhiteSpace(x) && title.Contains(x, StringComparison.OrdinalIgnoreCase));

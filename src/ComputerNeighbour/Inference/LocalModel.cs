@@ -9,12 +9,12 @@ using ComputerNeighbour.Platform;
 namespace ComputerNeighbour.Inference;
 
 public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
-public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep, RequestedSketch, SketchReview }
+public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep, RequestedSketch, SketchReview, WorkSearch, SketchRevision, SketchInspection }
 public interface IChatModel
 {
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct);
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,
-        purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.RequestedSketch or GenerationPurpose.SketchReview or GenerationPurpose.WorkTask
+        purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.RequestedSketch or GenerationPurpose.SketchReview or GenerationPurpose.SketchRevision or GenerationPurpose.WorkTask
             or GenerationPurpose.WorkStep or GenerationPurpose.DeepWorkStep,ct);
 }
 
@@ -27,10 +27,12 @@ public interface ITurnContextModel
 public sealed class LocalModel(PortablePaths paths, ModelOptions options, CancellationToken stopping = default) : IChatModel, ITurnContextModel, IDeepAnalysisModel, IAsyncDisposable
 {
     private static readonly JsonElement ContextSchema=JsonSerializer.Deserialize<JsonElement>("""
-    {"type":"object","additionalProperties":false,"required":["intent","request","uncertainty","evidence","effort"],"properties":{
-      "intent":{"type":"string","enum":["chat","screen","screen_followup","file_capability","web_capability","lookup_term","work"]},
+    {"type":"object","additionalProperties":false,"required":["intent","request","uncertainty","evidence","effort","operations","drawingSubject","continuesPrevious","previousEvidence"],"properties":{
+      "intent":{"type":"string","enum":["chat","screen","screen_research","screen_followup","file_capability","web_capability","lookup_term","work","revise"]},
       "effort":{"type":"string","enum":["quick","standard","deep"]},
-      "request":{"type":"string","maxLength":450},"uncertainty":{"type":"string","maxLength":180},"evidence":{"type":"string","maxLength":120}
+      "request":{"type":"string","maxLength":450},"uncertainty":{"type":"string","maxLength":180},"evidence":{"type":"string","maxLength":120},
+      "operations":{"type":"array","maxItems":8,"items":{"type":"string","enum":["open_app","desktop_input","read_file","write_file","search_web","read_browser","draw","copy_text"]}},
+      "drawingSubject":{"type":"string","maxLength":500},"continuesPrevious":{"type":"boolean"},"previousEvidence":{"type":"string","maxLength":120}
     }}
     """);
     private static readonly JsonElement[] SpeechSchemas=Enumerable.Range(1,SpeechDelivery.MaxDirectedSentences)
@@ -255,7 +257,10 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
     {
         GenerationPurpose.Sketch => RequestAsync(messages,true,.65,false,ct,SketchSchema,1350),
         GenerationPurpose.RequestedSketch => RequestAsync(messages,true,.25,false,ct,SketchSchema,3000),
+        GenerationPurpose.SketchRevision => RequestAsync(messages,true,.2,false,ct,SketchSchema,3600,thinkingBudget:512),
+        GenerationPurpose.SketchInspection => RequestAsync(messages,false,0,false,ct,maxTokens:140),
         GenerationPurpose.SketchReview => RequestAsync(messages,true,0,false,ct,SketchReviewSchema,240),
+        GenerationPurpose.WorkSearch => RequestAsync(messages,false,0,false,ct,maxTokens:100),
         GenerationPurpose.WorkTask => RequestAsync(messages,true,0,false,ct,WorkTaskSchema,1000),
         GenerationPurpose.StandardDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(1200,options.MaxReplyTokens+240),thinkingBudget:192,useAdapter:useAdapter),
         GenerationPurpose.DeepDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(2000,options.MaxReplyTokens+800),thinkingBudget:640,useAdapter:useAdapter),

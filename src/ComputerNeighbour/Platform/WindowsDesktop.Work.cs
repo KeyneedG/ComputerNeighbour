@@ -24,9 +24,11 @@ internal sealed record WorkFrame(WorkWindow Window, byte[] Image, int Width, int
 
 internal interface IWorkDesktop
 {
+    int? Launch(string executable);
+    Task<bool> OpenDocumentAsync(string executable, string path, CancellationToken ct);
     WorkWindow CurrentWindow();
     WorkFrame Observe(WorkWindow window);
-    void Focus(string executable);
+    void Focus(string executable, int? launchedProcess = null);
     void Restore(WorkWindow window);
     void Click(WorkFrame frame, int x, int y);
     void Type(WorkFrame frame, string text);
@@ -45,7 +47,7 @@ public sealed partial class WindowsDesktop
 
     internal static bool SupportsWorkKey(string key) => key.ToUpperInvariant() is
         "ENTER" or "TAB" or "SHIFT+TAB" or "ESC" or "BACKSPACE" or "SPACE" or
-        "UP" or "DOWN" or "LEFT" or "RIGHT" or "HOME" or "END" or "PAGEUP" or "PAGEDOWN" or "CTRL+A" or "CTRL+Z";
+        "UP" or "DOWN" or "LEFT" or "RIGHT" or "HOME" or "END" or "PAGEUP" or "PAGEDOWN" or "CTRL+A" or "CTRL+Z" or "CTRL+N";
 
     internal static bool IsWorkApplication(string process, string executable)
     {
@@ -54,6 +56,14 @@ public sealed partial class WindowsDesktop
             name.Equals("calc", StringComparison.OrdinalIgnoreCase) && process.Equals("CalculatorApp", StringComparison.OrdinalIgnoreCase);
     }
 
+    int? IWorkDesktop.Launch(string executable) => LaunchAllowedApp(executable);
+    async Task<bool> IWorkDesktop.OpenDocumentAsync(string executable, string path, CancellationToken ct)
+    {
+        EnsureWindows();
+        ct.ThrowIfCancellationRequested();
+        return StartDocument(executable,path) &&
+            await WaitForDocumentWindowAsync(Path.GetFileNameWithoutExtension(executable),path,ct);
+    }
     WorkWindow IWorkDesktop.CurrentWindow() => CurrentWorkWindow();
 
     WorkFrame IWorkDesktop.Observe(WorkWindow window)
@@ -65,21 +75,30 @@ public sealed partial class WindowsDesktop
             BinaryPrimitives.ReadInt32BigEndian(image.AsSpan(20, 4)));
     }
 
-    void IWorkDesktop.Focus(string executable)
+    void IWorkDesktop.Focus(string executable, int? launchedProcess)
     {
         EnsureWindows();
         var name = Path.GetFileNameWithoutExtension(executable);
         if (WorkExcludedProcesses.Contains(name)) throw new UnauthorizedAccessException("This application cannot be a desktop input target.");
         var names = name.Equals("calc", StringComparison.OrdinalIgnoreCase) ? new[] { name, "CalculatorApp" } : new[] { name };
         var windows = new HashSet<nint>();
+        nint launchedWindow = 0;
         foreach (var candidate in names.SelectMany(Process.GetProcessesByName))
         {
             using (candidate)
             {
                 var handle = candidate.MainWindowHandle;
                 if (handle != 0) windows.Add(handle);
+                if (candidate.Id == launchedProcess) launchedWindow = handle;
             }
         }
+        if (launchedWindow != 0)
+        {
+            Activate(launchedWindow);
+            _ = CurrentWorkWindow();
+            return;
+        }
+        if (windows.Contains(GetForegroundWindow())) return;
         if (windows.Count != 1) throw new InvalidOperationException("Bring the intended application window to the foreground. There must be exactly one open window for automatic focusing.");
         Activate(windows.Single());
         _ = CurrentWorkWindow();

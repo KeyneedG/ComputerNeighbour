@@ -6,6 +6,7 @@ using ComputerNeighbour.Configuration;
 using ComputerNeighbour.ConsoleInterface;
 using ComputerNeighbour.Context;
 using ComputerNeighbour.Inference;
+using ComputerNeighbour.Internet;
 using ComputerNeighbour.Memory;
 using ComputerNeighbour.Personality;
 using ComputerNeighbour.Platform;
@@ -84,6 +85,63 @@ internal static class BrowserTests
             foreach (var entry in new[] { "", "..", "chrome.exe --flag", "C:\\chrome.exe", "../chrome", "chrome.dll" })
                 Check.Throws<ArgumentException>(() => new WindowsBrowserReader(new() { AllowedProcesses = [entry] }, new()));
         });
+        await suite.Case("Google visual search uses the explicitly requested question and actual Chrome result", async root =>
+        {
+            const string source = "https://example.org/visual-source";
+            var google = new FakeGoogle(new("RESULT_TEXT: The sample image is a linocut.", [new("Visual source", source, DateTimeOffset.UtcNow, "browser")]));
+            var model = new FakeModel("Google identifies the sample as a linocut.");
+            await using var fixture = await Fixture.CreateAsync(root, model, new FakeBrowser(new("", "", null, "", false)), google);
+            await fixture.Engine.TryHandleAccessCommandAsync("/desktop on", default);
+            await fixture.Engine.RespondAsync("/google Какая здесь техника печати?", "user", false, false, default);
+            Check.True(google.Questions.SequenceEqual(["Какая здесь техника печати?"]), "The upload workflow did not use only the current question.");
+            Check.True(model.Calls.Single().Messages.Last().Text.Contains("RESULT_TEXT"), "No observed result reached the answer model.");
+            Check.True(fixture.Output.Lines.Last().Contains(source), "A visible source link was lost.");
+        });
+        await suite.Case("Google visual search requires current permission and the main user's request", async root =>
+        {
+            var google = new FakeGoogle(new("Unexpected result.", []));
+            await using var fixture = await Fixture.CreateAsync(root, new FakeModel(), new FakeBrowser(new("", "", null, "", false)), google);
+            await fixture.Engine.RespondAsync("/google What is this?", "user", false, false, default);
+            Check.True(fixture.Output.Lines.Last().Contains("guided desktop access"), "The disabled desktop was not reported.");
+            await fixture.Engine.TryHandleAccessCommandAsync("/desktop on", default);
+            await fixture.Engine.RespondAsync("/google What is this?", "guest", false, false, default);
+            await fixture.Engine.RespondAsync("/google What is this? Don't look at my screen.", "user", false, false, default);
+            await fixture.Engine.RespondAsync("/google Определи автора, но не отправляй изображение.", "user", false, false, default);
+            await fixture.Engine.TryHandleAccessCommandAsync("/ask before edit", default);
+            await fixture.Engine.RespondAsync("/google What is this?", "user", false, false, default);
+            Check.Equal(0, google.Questions.Count);
+        });
+        await suite.Case("Google visual input is pinned to the Google AI Mode origin and route", _ =>
+        {
+            foreach (var url in new[] { "https://www.google.com/ai", "google.com/search?udm=50&aep=11" })
+                Check.True(GoogleAiMode.IsAiModeUrl(url), "Rejected Google AI Mode URL: " + url);
+            foreach (var url in new[] { "https://www.google.com/search?udm=2", "https://google.com.example.org/search?udm=50",
+                         "https://www.google.com@other.example/ai", "https://www.google.com:5555/ai", "http://www.google.com/ai",
+                         "https://www.google.com/search?q=udm%3D50", "https://accounts.google.com/ai" })
+                Check.True(!GoogleAiMode.IsAiModeUrl(url), "Accepted an unrelated browser target: " + url);
+        });
+        await suite.Case("Google reply extraction requires this question with its image and excludes interface text", _ =>
+        {
+            const string question = "What color is this?";
+            const string header = "AI Mode reply for 1 image and " + question;
+            var page = "Google Account: profile information\nYou sent: 1 image and said: " + question + "\n" +
+                header + "\n\uFFFC\nThe rectangle is red.\nGood response\nBad response\nAsk anything";
+            Check.Equal("The rectangle is red.", GoogleAiMode.ExtractAnswer(page, question));
+            Check.True(GoogleAiMode.ExtractAnswer(page, "A different question?") is null, "An earlier reply was accepted.");
+            Check.True(GoogleAiMode.ExtractAnswer(header + "\nStill generating", question) is null, "An incomplete reply was accepted.");
+            Check.True(GoogleAiMode.ExtractAnswer(page.Replace("reply for 1 image and ", "reply for "), question) is null,
+                "A text-only reply was accepted.");
+        });
+    }
+
+    private sealed class FakeGoogle(GoogleVisualResult result) : IGoogleVisualSearch
+    {
+        public List<string> Questions { get; } = [];
+        public Task<GoogleVisualResult> SearchAsync(string question, Action<string> status, CancellationToken ct)
+        {
+            Questions.Add(question);
+            return Task.FromResult(result);
+        }
     }
 
     private sealed class FakeBrowser(BrowserPage page) : IBrowserReader
@@ -120,18 +178,18 @@ internal static class BrowserTests
         public required AudioService Audio { get; init; }
         public required WeatherService Weather { get; init; }
         public required Output Output { get; init; }
-        public static async Task<Fixture> CreateAsync(string root, IChatModel model, IBrowserReader browser)
+        public static async Task<Fixture> CreateAsync(string root, IChatModel model, IBrowserReader browser, IGoogleVisualSearch? google = null)
         {
             var paths = new PortablePaths(root);
             var config = new AppConfig(); config.Audio.Enabled = false;
-            config.Permissions.ScreenCapture = false; config.Permissions.ForegroundWindow = false;
+            config.Permissions.ScreenCapture = google is not null; config.Permissions.ForegroundWindow = false;
             config.Permissions.Microphone = false; config.Permissions.WeatherNetwork = false;
             Directory.CreateDirectory(paths.Inside("characters"));
             await File.WriteAllTextAsync(paths.Inside(config.CharacterFile), "You are a calm English-speaking companion.");
             var memory = new MemoryStore(root, config.Memory); await memory.InitializeAsync();
             var emotions = new EmotionEngine(root); await emotions.InitializeAsync();
             var audio = new AudioService(root, config.Audio); var weather = new WeatherService(config); var output = new Output();
-            return new() { Audio = audio, Weather = weather, Output = output, Memory = memory, Engine = new(paths, config, model, memory, emotions, new WindowsDesktop(config.Desktop), audio, output, weather, browser) { Paused = true } };
+            return new() { Audio = audio, Weather = weather, Output = output, Memory = memory, Engine = new(paths, config, model, memory, emotions, new WindowsDesktop(config.Desktop), audio, output, weather, browser) { Paused = true, GoogleVisualSearchOverride = google } };
         }
         public async ValueTask DisposeAsync() { await Engine.DisposeAsync(); await Audio.DisposeAsync(); Weather.Dispose(); }
     }

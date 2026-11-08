@@ -76,6 +76,9 @@ public sealed class FileWorkspace
     public Task<string> ApplyAsync(PreparedFileChange change, CancellationToken cancellationToken = default) =>
         ApplyAsync(change, verify: false, cancellationToken);
 
+    internal async Task<string> ReadForRevisionAsync(string path,CancellationToken ct) =>
+        Decode(await ReadBoundedAsync(ResolveWritable(path),ct)).Text;
+
     internal Task<string> ApplyVerifiedAsync(PreparedFileChange change, CancellationToken cancellationToken) =>
         ApplyAsync(change, verify: true, cancellationToken);
 

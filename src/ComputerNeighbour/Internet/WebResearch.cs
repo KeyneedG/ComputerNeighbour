@@ -21,7 +21,14 @@ public sealed class InternetOptions
 public sealed record WebCitation(string Title,string Url,DateTimeOffset RetrievedAt,string Kind="article",DateTimeOffset? PublishedAt=null);
 public sealed record SearchHit(string Title,string Url,string Snippet,DateTimeOffset? PublishedAt=null);
 public sealed record SearchResponse(string Query,string Provider,IReadOnlyList<SearchHit> Results,IReadOnlyList<string> Warnings);
-public sealed record WebArticle(string Title,string Url,string Text,bool Truncated,DateTimeOffset? PublishedAt=null);
+public sealed record WebArticle(string Title,string Url,string Text,bool Truncated,DateTimeOffset? PublishedAt=null)
+{
+    internal IReadOnlyList<WebLink> Links { get; init; } = [];
+    internal bool IsCatalog => Links.Count > 0 && Regex.IsMatch(Title,
+        @"\b(?:bibliograph\w*|catalog(?:ue)?|list of (?:works|publications))\b|библиограф|каталог|список (?:произведений|публикаций)|в хронологическом порядке",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+}
+internal sealed record WebLink(string Label,string Url);
 public interface IWebResearch
 {
     Task<SearchResponse> SearchAsync(string query,bool news,CancellationToken ct);
@@ -99,14 +106,36 @@ public static class WebParsing
         var titleMatch=Regex.Match(html,@"<title\b[^>]*>([\s\S]*?)</title>",RegexOptions.IgnoreCase,TimeSpan.FromSeconds(2));
         var title=titleMatch.Success?Text(titleMatch.Groups[1].Value):new Uri(document.Url).Host;
         var body=Regex.Match(html,@"<(?<tag>article|main)\b[^>]*>(?<body>[\s\S]*?)</\k<tag>\s*>",RegexOptions.IgnoreCase,TimeSpan.FromSeconds(2));
-        var text=document.ContentType.Contains("html",StringComparison.OrdinalIgnoreCase)?Text(body.Success?body.Groups["body"].Value:html):html.Trim();
+        var isHtml=document.ContentType.Contains("html",StringComparison.OrdinalIgnoreCase);
+        var content=body.Success?body.Groups["body"].Value:html;
+        var text=isHtml?Text(content):html.Trim();
         DateTimeOffset? published=null;
         foreach(Match tag in Regex.Matches(html,@"<meta\b[^>]*>",RegexOptions.IgnoreCase,TimeSpan.FromSeconds(2)))
         {
             var property=Attribute(tag.Value,"property")??Attribute(tag.Value,"name");
             if(property is not null&&new[]{"article:published_time","datePublished","pubdate","date"}.Contains(property,StringComparer.OrdinalIgnoreCase)&&DateTimeOffset.TryParse(Attribute(tag.Value,"content"),CultureInfo.InvariantCulture,DateTimeStyles.AssumeUniversal,out var date)){published=date;break;}
         }
-        return new(title,document.Url,text[..Math.Min(maximum,text.Length)],text.Length>maximum,published);
+        return new(title,document.Url,text[..Math.Min(maximum,text.Length)],text.Length>maximum,published)
+            { Links=isHtml?ArticleLinks(content,new Uri(document.Url)):[] };
+    }
+
+    private static IReadOnlyList<WebLink> ArticleLinks(string html,Uri origin)
+    {
+        html=Replace(html,@"<!--[\s\S]*?-->|<(script|style|nav|footer|header)\b[^>]*>[\s\S]*?</\1\s*>","");
+        var links=new List<WebLink>();
+        var seen=new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match match in Regex.Matches(html,@"<a\b(?<attrs>[^>]*)>(?<label>[\s\S]*?)</a>",RegexOptions.IgnoreCase,TimeSpan.FromSeconds(2)))
+        {
+            var href=Attribute(match.Groups["attrs"].Value,"href");
+            if (string.IsNullOrWhiteSpace(href)||href.StartsWith('#')||!Uri.TryCreate(origin,href,out var link)||
+                link.Host!=origin.Host||link.Scheme!=origin.Scheme||link.Port!=origin.Port||!IsWebUrl(link.AbsoluteUri)) continue;
+            var label=Regex.Replace(Text(match.Groups["label"].Value),@"\s+"," ");
+            var address=new UriBuilder(link){Fragment=""}.Uri.AbsoluteUri;
+            if (label.Length is <3 or >160||address.Length>500||!seen.Add(address)) continue;
+            links.Add(new(label,address));
+            if (links.Count==40) break;
+        }
+        return links;
     }
     private static string? Attribute(string tag,string name)
     {

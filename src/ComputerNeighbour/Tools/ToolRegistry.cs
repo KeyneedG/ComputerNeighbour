@@ -11,7 +11,10 @@ using ComputerNeighbour.Internet;
 namespace ComputerNeighbour.Tools;
 
 public sealed record ToolRequest(string Tool, Dictionary<string,JsonElement>? Args = null);
-public sealed record ToolResult(string Tool, bool Success, string Text,IReadOnlyList<WebCitation>? Sources=null,IReadOnlyList<SearchHit>? SearchResults=null);
+public sealed record ToolResult(string Tool, bool Success, string Text,IReadOnlyList<WebCitation>? Sources=null,IReadOnlyList<SearchHit>? SearchResults=null)
+{
+    internal WebArticle? Article { get; init; }
+}
 public sealed record ToolContext(PortablePaths Paths, AppConfig Config, WindowsDesktop Desktop, IBrowserReader? Browser = null,IWebResearch? Web=null,IOpenDocumentReader? OpenDocuments=null);
 public interface ICompanionTool
 {
@@ -135,8 +138,29 @@ public static class PublicWeb
             await using var stream=await response.Content.ReadAsStreamAsync(ct);
             using var output=new MemoryStream(); var buffer=new byte[8192]; int n;
             while((n=await stream.ReadAsync(buffer,ct))>0) { if(output.Length+n>2_000_000) throw new IOException("Article exceeds 2 MB."); output.Write(buffer,0,n); }
-            return new(uri.AbsoluteUri,type,Encoding.UTF8.GetString(output.ToArray()));
+            return new(uri.AbsoluteUri,type,DecodeDocument(output.ToArray(),response.Content.Headers.ContentType?.CharSet));
         }
         throw new HttpRequestException("Too many redirects.");
+    }
+
+    internal static string DecodeDocument(byte[] bytes,string? charset)
+    {
+        static Encoding? Resolve(string? label)
+        {
+            if(string.IsNullOrWhiteSpace(label))return null;
+            label=label.Trim().Trim('"','\'');
+            try{return CodePagesEncodingProvider.Instance.GetEncoding(label)??Encoding.GetEncoding(label);}
+            catch(ArgumentException){return null;}
+        }
+        var encoding=Resolve(charset);
+        if(encoding is null)
+        {
+            var prefix=Encoding.Latin1.GetString(bytes,0,Math.Min(bytes.Length,4096));
+            var meta=System.Text.RegularExpressions.Regex.Match(prefix,
+                """<meta\b[^>]*?\bcharset\s*=\s*["']?([a-zA-Z0-9_.-]+)""",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            encoding=Resolve(meta.Groups[1].Value);
+        }
+        using var reader=new StreamReader(new MemoryStream(bytes,writable:false),encoding??Encoding.UTF8,detectEncodingFromByteOrderMarks:true);
+        return reader.ReadToEnd();
     }
 }

@@ -4,7 +4,7 @@ using System.Text;
 namespace ComputerNeighbour.Browser;
 
 /// <summary>
-/// Minimal, read-only IUIAutomation ABI. Vtable positions and signatures follow Microsoft's
+/// Minimal IUIAutomation ABI. Vtable positions and signatures follow Microsoft's
 /// UIAutomationClient.h (win32metadata); explicit ownership keeps COM pointers on their MTA.
 /// No WindowsDesktop/WPF framework or separately installed package is required.
 /// </summary>
@@ -62,6 +62,41 @@ internal sealed class NativeUia : IDisposable
     {
         var result = Method<GetPropertyDelegate>(element, 10)(element.Handle, property, out var value);
         try { return result >= 0 && value.Type == 11 ? (short)value.Integer != 0 : null; }
+        finally { VariantClear(ref value); }
+    }
+
+    internal void SetFocus(ComPointer element) =>
+        Marshal.ThrowExceptionForHR(Method<ElementActionDelegate>(element, 3)(element.Handle));
+
+    internal bool TryInvoke(ComPointer element) =>
+        TryControlAction(element, 10000, "fb377fbe-8ea6-46d5-9c73-6499642d3059", 3) ||
+        TryControlAction(element, 10005, "619be086-1f4e-4ee4-bafa-210128738730", 3) ||
+        TryControlAction(element, 10018, "828055ad-355b-4435-86d5-3b51c14a9b1b", 4);
+
+    private static bool TryControlAction(ComPointer element, int patternId, string interfaceId, int slot)
+    {
+        var iid = new Guid(interfaceId);
+        if (Method<GetPatternAsDelegate>(element, 14)(element.Handle, patternId, ref iid, out var pointer) < 0 || pointer == IntPtr.Zero)
+            return false;
+        using var pattern = new ComPointer(pointer);
+        return Method<ElementActionDelegate>(pattern, slot)(pattern.Handle) >= 0;
+    }
+
+    internal (int X, int Y)? ElementCenter(ComPointer element)
+    {
+        if (Method<GetClickablePointDelegate>(element, 84)(element.Handle, out var point, out var clickable) >= 0 && clickable != 0)
+            return (point.X, point.Y);
+        var result = Method<GetPropertyDelegate>(element, 10)(element.Handle, 30001, out var value);
+        try
+        {
+            if (result < 0 || value.Type != 0x2005 || value.Pointer == IntPtr.Zero) return null; // VT_ARRAY | VT_R8
+            var bounds = new double[4];
+            for (var index = 0; index < bounds.Length; index++)
+                if (SafeArrayGetElement(value.Pointer, ref index, out bounds[index]) < 0 || !double.IsFinite(bounds[index]))
+                    return null;
+            if (bounds[2] <= 0 || bounds[3] <= 0) return null;
+            return (checked((int)(bounds[0] + bounds[2] / 2)), checked((int)(bounds[1] + bounds[3] / 2)));
+        }
         finally { VariantClear(ref value); }
     }
 
@@ -186,8 +221,12 @@ internal sealed class NativeUia : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetIntDelegate(IntPtr self, out int value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetElementDelegate(IntPtr self, int index, out IntPtr element);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetParentDelegate(IntPtr self, IntPtr element, out IntPtr parent);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int ElementActionDelegate(IntPtr self);
+    [StructLayout(LayoutKind.Sequential)] private struct UiaPoint { public int X, Y; }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetClickablePointDelegate(IntPtr self, out UiaPoint point, out int clickable);
     [DllImport("ole32.dll")] private static extern int CoInitializeEx(IntPtr reserved, uint flags);
     [DllImport("ole32.dll")] private static extern void CoUninitialize();
     [DllImport("ole32.dll")] private static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint context, ref Guid iid, out IntPtr instance);
     [DllImport("oleaut32.dll")] private static extern int VariantClear(ref Variant variant);
+    [DllImport("oleaut32.dll")] private static extern int SafeArrayGetElement(IntPtr array, ref int index, out double element);
 }

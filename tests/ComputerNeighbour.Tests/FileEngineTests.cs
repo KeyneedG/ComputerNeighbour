@@ -92,32 +92,40 @@ internal static class FileEngineTests
             Check.True(!fixture.Output.Lines.Any(l=>l.Contains("[Approval")),"A full-access user write was still queued.");
             Check.Equal(0,model.Calls);
         });
-        await suite.Case("the reported Pushkin request preserves Windows Documents and follows session approvals", async root =>
+        await suite.Case("model-composed files preserve Windows Documents and follow session approvals", async root =>
         {
-            const string request = "привет, можешь создать текстовый документ и написать в нем простой стих пушкина. сохрани все в папку Documents/Evenlin/";
-            var model = new ScriptedModel();
+            const string request = "привет, можешь создать текстовый документ с расписанием на субботу. сохрани в папку Documents/Evenlin/";
+            const string content = "Saturday\n10:00 — Breakfast";
             var portableRoot = Path.Combine(root, "portable");
             var userDocuments = Path.Combine(root, "WindowsDocuments");
             var destination = Path.Combine(userDocuments, "Evenlin");
+            var first = Path.Combine(destination, "schedule.txt");
+            var second = Path.Combine(destination, "schedule_2.txt");
+            string Create(string path) => JsonSerializer.Serialize(new
+            {
+                plan = Array.Empty<string>(),
+                action = new { tool = "create_file", args = new { path, content } },
+                reply = ""
+            });
+            const string done = """{"plan":[],"action":null,"reply":"Created and verified the file."}""";
+            var model = new ScriptedModel(Create(first), done, Create(second), done);
             await using var fixture = await Fixture.CreateAsync(portableRoot, model, userDocuments: userDocuments);
 
             await fixture.Engine.TryHandleAccessCommandAsync("/full access", default);
             await fixture.Engine.RespondAsync(request, "user", false, false, default);
-            var first = Path.Combine(destination, "pushkin_poem.txt");
-            Check.Equal(PushkinPoetry.Text, await File.ReadAllTextAsync(first));
+            Check.Equal(content, await File.ReadAllTextAsync(first));
             Check.True(!Directory.Exists(Path.Combine(portableRoot, "documents", "Evenlin")), "The write was redirected into the portable workspace.");
             Check.True(!fixture.Output.Lines.Any(line => line.Contains("[Approval")), "Session full access requested an approval.");
-            Check.True(fixture.Output.Lines.Last().Contains(first) && fixture.Output.Lines.Last().Contains("Verified the saved bytes."),
+            Check.True(fixture.Output.Lines.Any(line=>line.Contains(first) && line.Contains("Verified the saved bytes.")),
                 "The reply did not report the verified Windows path.");
 
             await fixture.Engine.TryHandleAccessCommandAsync("/ask before edit", default);
             await fixture.Engine.RespondAsync(request, "user", false, false, default);
-            var second = Path.Combine(destination, "pushkin_poem_2.txt");
             Check.True(!File.Exists(second), "Ask mode applied a write before approval.");
             Check.Equal(1, fixture.Output.Lines.Count(line => line.Contains("[Approval 1]")));
             await fixture.Engine.ApproveAsync(1, default);
-            Check.Equal(PushkinPoetry.Text, await File.ReadAllTextAsync(second));
-            Check.Equal(0, model.Calls);
+            Check.Equal(content, await File.ReadAllTextAsync(second));
+            Check.Equal(4, model.Calls);
         });
         await suite.Case("the model cannot change an explicitly requested destination folder", async root =>
         {

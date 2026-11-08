@@ -116,6 +116,7 @@ public static class ReplyQuality
             @"|(?:sav(?:e|ing)|writ(?:e|ing)|typ(?:e|ing)|edit(?:ing)?|creat(?:e|ing)|draw(?:ing)?|sketch(?:ing)?|click(?:ing)?|mov(?:e|ing)|press(?:ing)?)\b[^.!?\r\n]{0,100}\b" + computerTarget + @"\b)",
             ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve| have)?\s+(?:(?:just|already|successfully)\s+)*(?:opened|launched|switched to)" + appTarget, ignoreCase) ||
+            Regex.IsMatch(answer, @"\bI(?:['’]ve| have| did)?\s+(?:(?:just|already|successfully)\s+)*(?:(?:start(?:ed)?\s+(?:typing|writing|drawing|editing))|typed|wrote|drew|saved|edited)\b[^.!?\r\n]{0,80}\b" + computerTarget + @"\b", ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve got| have)\s+(?:the|my|a)\s+(?:drawing\s+)?brush ready\b|" +
                 @"\bI(?:['’]m| am)\s+(?:drafting|drawing|sketching)\b[^.!?\r\n]{0,70}\b(?:right before (?:our|your) eyes|in front of you)\b", ignoreCase);
     }

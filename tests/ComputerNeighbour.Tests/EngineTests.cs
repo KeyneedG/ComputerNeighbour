@@ -18,6 +18,13 @@ internal static class EngineTests
     private static string Decision(string reply = "", List<ToolRequest>? actions = null, bool speak = true, string memory = "") =>
         JsonSerializer.Serialize(new CompanionDecision { Speak = speak, Reply = reply, Memory = memory, Emotion = new EmotionDelta(), Actions = actions ?? [] }, AppConfig.Json);
     private static Dictionary<string, JsonElement> Args(object value) => JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(value))!;
+    private const string DrawingPlan = """
+        {"title":"Window portrait","background":"#EEE1D4","shapes":[
+            {"kind":"rectangle","color":"#A5C2DD","x":10,"y":12,"w":30,"h":65},
+            {"kind":"ellipse","color":"#2F2449","x":41,"y":15,"w":29,"h":62},
+            {"kind":"ellipse","color":"#FFE2C3","x":46,"y":28,"w":19,"h":38}]}
+        """;
+    private const string DrawingReview = """{"matches":true,"reason":"A portrait with warm side light."}""";
 
     public static async Task RunAsync(Suite suite)
     {
@@ -356,7 +363,7 @@ internal static class EngineTests
             Check.Equal(2, desktop.Captures);
             Check.True(model.Calls[2].Messages.Last().Image is [4, 5, 6] && model.Calls[3].Messages.Last().Image is null,
                 "The workflow reused a stale image or missed the successful verification image.");
-            Check.True(f.Output.Lines.Last().Contains("Inspect the foreground"), "The lost target was not reported.");
+            Check.True(f.Output.Lines.Last().Contains("not in the foreground"), "The lost target was not reported.");
         });
 
         const string notepadRequest = "Привет можешь написать в блокноте какой-то короткий стих пушкина";
@@ -397,6 +404,8 @@ internal static class EngineTests
             var blank = new WorkFrame(new(10, 10, 11, "Notepad", "Untitled", 0, 0, 500, 300), [1, 2, 3], 500, 300);
             var model = new WorkflowModel([Routing("chat", "standard")],
                 WorkStep("observe_window", new {}),
+                WorkStep(reply: "I wrote the poem in Notepad."),
+                WorkStep(reply: "I wrote the poem in Notepad."),
                 WorkStep(reply: "I wrote the poem in Notepad."));
             await using var f = await Fixture.CreateAsync(root, model, workDesktop: new WorkDesktopStub(blank));
             f.Config.Permissions.ScreenCapture = true;
@@ -405,14 +414,77 @@ internal static class EngineTests
             Check.True(f.Output.Lines.Last().Contains("stopped before entering text"), "Inspection was reported as a completed edit.");
         });
 
+        await suite.Case("semantic work combines live source retrieval and editor input for a request and its confirmation", async root =>
+        {
+            const string request = "Можешь открыть блокнот и написать в нем произведение тургенева, загугли если не знаешь";
+            const string passage = "Opening sentence.\nClosing sentence.";
+            const string index = "https://example.com/catalog";
+            const string url = "https://example.com/work";
+            foreach (var continued in new[] { false, true })
+            {
+                var folder = Path.Combine(root, continued ? "continued" : "direct");
+                var blank = new WorkFrame(new(10, 10, 11, "Notepad", "Untitled", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+                var desktop = new WorkDesktopStub(blank, blank with { Image = [4, 5, 6] });
+                var route = JsonSerializer.Serialize(new
+                {
+                    intent = "work",
+                    request = "Open a text editor and enter a literary work, searching if needed.",
+                    effort = "standard",
+                    uncertainty = "",
+                    evidence = continued ? "Давай" : "",
+                    continuesPrevious = continued,
+                    previousEvidence = continued ? "открыть блокнот" : "",
+                    operations = new[] { "open_app", "desktop_input", "search_web", "write_file", "copy_text" }
+                });
+                var web = new WorkWebStub(index, url, "Page navigation\n" + passage + "\nSite footer");
+                string[] delivery = continued
+                    ? [WorkStep("open_app", new { name = "notepad" }), WorkStep("observe_window", new {}),
+                        WorkStep("type_text", new { sourceStep = 4, start = "Opening sentence.", end = "Closing sentence." })]
+                    : [WorkStep("open_text", new { sourceStep = 4, start = "Opening sentence.", end = "Closing sentence." })];
+                var model = new WorkflowModel([route], [
+                    WorkStep("search_web", new { query = "a short Turgenev work" }),
+                    "произведение тургенева",
+                    WorkStep("read_web", new { link = 1 }),
+                    WorkStep("open_text", new { sourceStep = 2, start = "A listing", end = "texts" }),
+                    WorkStep("read_web", new { link = 2 }),
+                    .. delivery,
+                    WorkStep(reply: "The requested text is in Notepad.")]);
+                await using var f = await Fixture.CreateAsync(folder, model, workDesktop: desktop, web: web);
+                f.Config.Permissions.ScreenCapture = true;
+                await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+                if (continued) await f.Memory.AppendAsync("user", request, "user");
+                await f.Engine.RespondAsync(continued ? "Давай" : request, "user", false, false, default);
+                Check.Equal("произведение тургенева", web.Queries.Single());
+                Check.True(web.Reads.SequenceEqual([index, url]), "The planner did not follow the fetched catalog link.");
+                Check.True(f.Output.Lines.Any(line => line.Contains("That page is a catalog")), "A catalog was accepted as the requested work.");
+                if (continued)
+                {
+                    Check.Equal("notepad.exe", desktop.Launched.Single());
+                    Check.Equal(passage, desktop.Typed.Single(), "The editor received generated text rather than the exact source passage.");
+                    Check.Equal(2, desktop.Captures);
+                }
+                else
+                {
+                    var opened = desktop.OpenedDocuments.Single();
+                    Check.Equal("notepad.exe", opened.Executable);
+                    Check.Equal(passage, await File.ReadAllTextAsync(opened.Path));
+                    Check.Equal(0, desktop.Captures, "Opening the prepared text should not require foreground input.");
+                }
+                Check.True(!model.Calls[0].Messages[0].Text.Contains("create_file:"), "Editor input incorrectly granted a separate file write.");
+                Check.Equal(GenerationPurpose.WorkSearch, model.Calls[1].Purpose);
+                Check.True(!model.Calls[1].Messages.Last().Text.Contains("a short Turgenev work"), "The rewrite was contaminated by the proposed query.");
+                Check.True(!f.Output.Lines.Any(line => line.Contains("[Approval")), "The task ignored session access.");
+            }
+        });
+
         await suite.Case("the reported Paint request saves a verified PNG before opening it", async root =>
         {
             var opened = new List<string>();
-            var model = new ScriptedModel();
+            var model = new ScriptedModel(DrawingPlan, DrawingReview);
             await using var f = await Fixture.CreateAsync(root, model, openSketch: path =>
             {
                 var png = File.ReadAllBytes(path);
-                Check.True(png.Length > 1000 && png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
+                Check.True(png.Length > 100 && png.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }),
                     "Paint was given a missing or invalid PNG.");
                 opened.Add(path);
                 return true;
@@ -420,7 +492,7 @@ internal static class EngineTests
             f.Config.Permissions.AllowAutonomousFileActions = false;
             await f.Engine.TryHandleAccessCommandAsync("/full access", default);
             await f.Engine.RespondAsync("Можешь нарисовать аниме лицо в Paint?", "user", false, false, default);
-            Check.Equal(0, model.Calls.Count);
+            Check.Equal(2, model.Calls.Count);
             Check.Equal(opened.Single(), Directory.GetFiles(Path.Combine(root, "documents", "evelyn-sketches"), "*.png").Single());
             Check.True(f.Output.Lines.Any(line => line.StartsWith("[Plan]")) &&
                 f.Output.Lines.Last().Contains("verified that Paint opened"), "The work and its outcome were not reported.");
@@ -430,7 +502,7 @@ internal static class EngineTests
         await suite.Case("the reported self-portrait request and affirmative follow-up both open verified drawings in Paint", async root =>
         {
             var opened = new List<string>();
-            var model = new WorkflowModel([]);
+            var model = new WorkflowModel([Routing("chat", "standard")], DrawingPlan, DrawingReview, DrawingPlan, DrawingReview);
             await using var f = await Fixture.CreateAsync(root, model, openSketch: path =>
             {
                 Check.True(new FileInfo(path).Length > 1000, "The self-portrait was not written before opening Paint.");
@@ -440,18 +512,19 @@ internal static class EngineTests
             await f.Engine.TryHandleAccessCommandAsync("/full access", default);
             await f.Engine.RespondAsync("Можешь попробовать нарисовать себя в Paint?\nКак ты себя представляешь", "user", false, false, default);
             Check.Equal(1, opened.Count);
-            Check.True(f.Output.Lines.Last().Contains("Self-portrait by the window") &&
-                f.Output.Lines.Last().Contains("warm light catching one side of my hair"), "The portrait's description was missing.");
+            Check.True(f.Output.Lines.Last().Contains("Window portrait") &&
+                f.Output.Lines.Last().Contains("A portrait with warm side light"), "The portrait's description was missing.");
+            Check.True(model.Calls[0].Messages.Last().Text.Contains("Character profile"), "The model did not receive character context.");
             await f.Engine.RespondAsync("Да, нарисуй себя", "user", false, false, default);
             Check.Equal(2, opened.Distinct().Count(), "The follow-up lost the Paint destination from the original request.");
-            Check.Equal(0, model.Calls.Count);
+            Check.Equal(4, model.Calls.Count);
             Check.Equal(2, f.Output.Lines.Count(line => line.StartsWith("[Plan]")));
         });
 
         await suite.Case("a drawing follow-up only inherits Paint from a matching owner request", async root =>
         {
             var opened = 0;
-            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openSketch: _ =>
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(DrawingPlan, DrawingReview), openSketch: _ =>
             {
                 opened++;
                 return true;
@@ -461,6 +534,126 @@ internal static class EngineTests
             await f.Engine.RespondAsync("Yes, draw yourself.", "user", false, false, default);
             Check.Equal(0, opened, "Another speaker supplied the Paint destination.");
             Check.Equal(1, Directory.GetFiles(Path.Combine(root, "documents", "evelyn-sketches"), "*.png").Length);
+        });
+
+        await suite.Case("a contextual drawing revision uses the actual prior pixels after a restart", async root =>
+        {
+            string original;
+            byte[] bytes;
+            await using (var first = await Fixture.CreateAsync(root, new ScriptedModel(DrawingPlan, DrawingReview), openSketch: _ => true))
+            {
+                await first.Engine.TryHandleAccessCommandAsync("/full access", default);
+                await first.Engine.RespondAsync("Draw a portrait in Paint.", "user", false, false, default);
+                original = first.Memory.LastArtifact!.Path;
+                bytes = await File.ReadAllBytesAsync(original);
+            }
+            const string overlay = """
+                {"title":"Improved portrait","background":"#FFFFFF","shapes":[
+                  {"kind":"ellipse","color":"#192040","x":50,"y":40,"w":3,"h":4}]}
+                """;
+            var model = new WorkflowModel([Routing("revise", "standard", "дорисовать")], overlay, "A portrait with another visible eye.", DrawingReview);
+            string? opened = null;
+            await using var next = await Fixture.CreateAsync(root,model,openSketch: path => { opened = path; return true; });
+            await next.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await next.Engine.RespondAsync("Это не очень похоже на лицо, можешь дорисовать?", "user", false, false, default);
+            Check.True(opened is not null && opened != original, "The revised image was not opened as its own version.");
+            Check.True(model.Calls[0].Messages.Last().Image!.SequenceEqual(bytes), "The renderer did not receive the prior PNG.");
+            Check.True(model.Calls[1].Messages.All(message=>!message.Text.Contains("не очень похоже")), "The independent review saw the request.");
+            Check.Equal(2, model.Calls[2].Messages.Count(message => message.Image is not null));
+            var originalAfter = await File.ReadAllBytesAsync(original);
+            var revision = await File.ReadAllBytesAsync(opened!);
+            Check.True(bytes.SequenceEqual(originalAfter), "The original image was overwritten.");
+            Check.True(!bytes.SequenceEqual(revision), "The new image did not change.");
+            Check.Equal(opened, next.Memory.LastArtifact!.Path);
+        });
+
+        await suite.Case("an implicit revision rereads and edits the same saved text file", async root =>
+        {
+            const string path = "documents/outline.txt";
+            var model = new WorkflowModel([Routing("revise", "standard", "finish that with one practical next step")],
+                WorkStep("read_file", new { path }),
+                WorkStep("edit_file", new { path, oldText = "Ends here.", newText = "Ends here. Next: check the schedule." }),
+                WorkStep(reply: "I added the next step to the outline."));
+            await using var f = await Fixture.CreateAsync(root,model);
+            Directory.CreateDirectory(Path.Combine(root,"documents"));
+            await File.WriteAllTextAsync(Path.Combine(root,path),"Keep the introduction. Ends here.");
+            await f.Memory.SaveArtifactAsync(new(WorkArtifactKind.TextFile,path,"Create the meeting outline.","user"),default);
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            await f.Engine.RespondAsync("Can you finish that with one practical next step?", "user", false, false, default);
+            Check.Equal("Keep the introduction. Ends here. Next: check the schedule.",await File.ReadAllTextAsync(Path.Combine(root,path)));
+            Check.True(model.Calls[1].Messages.Any(message=>message.Text.Contains("Keep the introduction.")),"The edit did not receive the current file content.");
+        });
+
+        await suite.Case("feedback without an edit request does not change the saved artifact", async root =>
+        {
+            var model = new WorkflowModel([Routing("chat", "quick")], "That looks like it needs more detail.", Decision(speak:false));
+            await using var f = await Fixture.CreateAsync(root,model);
+            f.Config.TurnProcessing.RefineInput = false;
+            await f.Memory.SaveArtifactAsync(new(WorkArtifactKind.TextFile,"documents/note.txt","Make a short note.","user"),default);
+            await f.Engine.RespondAsync("The result feels incomplete.", "user", false, false, default);
+            Check.True(f.Output.Lines.All(line=>!line.StartsWith("[Work") && !line.StartsWith("[Step")), "Feedback alone started an edit.");
+        });
+
+        await suite.Case("screen research after an unrelated saved drawing is read-only and uses the latest capture", async root =>
+        {
+            const string query = "example mural museum doorway and seated figures";
+            const string source = "https://example.org/catalog";
+            var web = new WorkWebStub(source, "https://example.org/work", "");
+            var model = new WorkflowModel([Routing("revise", "standard", "поискать")],
+                "The screen shows an illustration with figures near a doorway.", query,
+                "The museum catalog is relevant, but it does not establish a match.");
+            var captures = 0;
+            var launches = 0;
+            await using var f = await Fixture.CreateAsync(root, model, capture: () => [1, 2, (byte)++captures],
+                openSketch: _ => { launches++; return true; }, web: web);
+            f.Config.Permissions.ScreenCapture = true;
+            f.Config.TurnProcessing.RefineInput = false;
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            var directory = Path.Combine(root, "documents", "evelyn-sketches");
+            Directory.CreateDirectory(directory);
+            var original = Path.Combine(directory, "earlier.png");
+            await File.WriteAllBytesAsync(original, [6, 7, 8]);
+            await f.Memory.SaveArtifactAsync(new(WorkArtifactKind.Image, original, "Draw a portrait in Paint.", "user", true), default);
+
+            await f.Engine.RespondAsync("Можешь посмотреть на эту стилизованную иллюстрацию и определить источник?", "user", false, false, default);
+            await f.Engine.RespondAsync("персонажи здесь вымышленные, можешь поискать оригинальную картину?", "user", false, false, default);
+
+            Check.Equal(2, captures);
+            Check.Equal(0, launches);
+            Check.True(Directory.GetFiles(directory).SequenceEqual([original]), "Research wrote an image file.");
+            Check.Equal(original, f.Memory.LastArtifact!.Path);
+            Check.True(web.Queries.SequenceEqual([query]) && web.Reads.SequenceEqual([source]), "The lookup did not use verified web results.");
+            Check.True(model.Calls.Skip(1).All(call => call.Messages.Last().Image is [1, 2, 2]), "Search and synthesis did not use the fresh capture.");
+            Check.True(f.Output.Lines.Last().Contains(source), "The answer lacked its verified source.");
+        });
+
+        await suite.Case("an independent web lookup keeps its explicit subject after a screen observation", async root =>
+        {
+            const string source = "https://example.org/catalog";
+            var web = new WorkWebStub(source, "https://example.org/work", "");
+            var model = new WorkflowModel([Routing("chat", "quick")], "I see an open illustration.", "The catalog explains the material.");
+            var captures = 0;
+            await using var f = await Fixture.CreateAsync(root, model, capture: () => [1, 2, (byte)++captures], web: web);
+            f.Config.Permissions.ScreenCapture = true;
+            f.Config.TurnProcessing.RefineInput = false;
+            await f.Engine.RespondAsync("Look at my screen.", "user", false, false, default);
+            await f.Engine.RespondAsync("Look up the history of porcelain.", "user", false, false, default);
+            Check.Equal(1, captures);
+            Check.True(web.Queries.SequenceEqual(["the history of porcelain"]), "The lookup replaced the explicit subject with screen context.");
+            Check.True(model.Calls.Last().Messages.All(message => message.Image is null), "An independent lookup used a screen image.");
+        });
+
+        await suite.Case("screen research rejects a query containing a private address", async root =>
+        {
+            var web = new WorkWebStub("https://example.org/catalog", "https://example.org/work", "");
+            var model = new ScriptedModel("private-person@example.org");
+            var captures = 0;
+            await using var f = await Fixture.CreateAsync(root, model, capture: () => [1, 2, (byte)++captures], web: web);
+            f.Config.Permissions.ScreenCapture = true;
+            await f.Engine.RespondAsync("Look at my screen and search for this product.", "user", false, false, default);
+            Check.Equal(1, captures);
+            Check.Equal(0, web.Queries.Count);
+            Check.True(f.Output.Lines.Last().Contains("couldn't identify a public subject"), "Unsafe query did not get a clear fallback.");
         });
 
         await suite.Case("a different drawing retries an invalid plan and keeps the PNG when Paint fails", async root =>
@@ -487,7 +680,7 @@ internal static class EngineTests
         await suite.Case("drawing and launching Paint resume the same workflow after separate approvals", async root =>
         {
             var opened = new List<string>();
-            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openSketch: path =>
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(DrawingPlan, DrawingReview), openSketch: path =>
             {
                 opened.Add(path);
                 return true;
@@ -1086,19 +1279,52 @@ internal static class EngineTests
         public List<string> Typed { get; } = [];
         public List<(int, int)> Clicked { get; } = [];
         public List<string> Keys { get; } = [];
+        public List<string> Launched { get; } = [];
+        public List<(string Executable, string Path)> OpenedDocuments { get; } = [];
         public int Captures => observation;
         public WorkWindow CurrentWindow() => frames[observation].Window;
+        public int? Launch(string executable)
+        {
+            Launched.Add(executable);
+            return 11;
+        }
+        public Task<bool> OpenDocumentAsync(string executable, string path, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            OpenedDocuments.Add((executable,path));
+            return Task.FromResult(true);
+        }
         public WorkFrame Observe(WorkWindow window)
         {
             Check.Equal(window, CurrentWindow());
             return frames[observation++];
         }
-        public void Focus(string executable) => throw new InvalidOperationException("Unexpected focus.");
+        public void Focus(string executable, int? launchedProcess = null) => throw new InvalidOperationException("Unexpected focus.");
         public void Restore(WorkWindow window) => throw new InvalidOperationException("Unexpected restore.");
         public void Click(WorkFrame frame, int x, int y) => Clicked.Add(frame.ScreenPoint(x, y));
         public void Type(WorkFrame frame, string text) => Typed.Add(text);
         public void Key(WorkFrame frame, string key) => Keys.Add(key);
         public void Scroll(WorkFrame frame, int ticks) => throw new InvalidOperationException("Unexpected scroll.");
+    }
+
+    private sealed class WorkWebStub(string index, string url, string body) : IWebResearch
+    {
+        public List<string> Queries { get; } = [];
+        public List<string> Reads { get; } = [];
+
+        public Task<SearchResponse> SearchAsync(string query, bool news, CancellationToken ct)
+        {
+            Queries.Add(query);
+            return Task.FromResult(new SearchResponse(query, "fixture", [new("Catalog", index, "A listing of texts")], []));
+        }
+
+        public Task<WebArticle> ReadAsync(string address, CancellationToken ct)
+        {
+            Reads.Add(address);
+            return Task.FromResult(address == index
+                ? new WebArticle("Catalog", index, "A listing of texts", false) { Links = [new("A short work", url)] }
+                : new WebArticle("A short work", url, body, false));
+        }
     }
 
     private sealed class ScriptedModel(params string[] responses) : IChatModel
@@ -1144,7 +1370,7 @@ internal static class EngineTests
         public required AudioService Audio { get; init; }
         public required WeatherService Weather { get; init; }
         public required CapturingOutput Output { get; init; }
-        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null,IWorkDesktop? workDesktop=null)
+        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null,IWorkDesktop? workDesktop=null,IWebResearch? web=null)
         {
             var paths = new PortablePaths(root);
             var config = new AppConfig();
@@ -1163,7 +1389,7 @@ internal static class EngineTests
             return new Fixture
             {
                 Config = config, Memory = memory, Audio = audio, Weather = weather, Output = output,
-                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch) { Paused = true, WorkDesktopOverride = workDesktop }
+                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,webResearch:web,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch) { Paused = true, WorkDesktopOverride = workDesktop }
             };
         }
         public async ValueTask DisposeAsync()
