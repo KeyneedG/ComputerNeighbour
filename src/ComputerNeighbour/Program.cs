@@ -291,7 +291,7 @@ public static class Program
     /character     Show developing and established habits and interests
     /tasks         List saved work tasks and upcoming reminders
     /task          Show task commands for saving, resuming, and linking materials
-    /start incognito  Start a temporary copy of the current session for text experiments
+    /start incognito  Start a temporary copy of the current session for experiments
     /stop incognito   Discard the temporary state and return to the regular session
     /compact       Compact memory now with the model
     /forget CONFIRM Erase conversation memory and saved tasks

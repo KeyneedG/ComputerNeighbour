@@ -47,7 +47,7 @@ internal sealed class CompanionSession(CompanionEngine regular, ICompanionOutput
                 var isolated = await regular.ForkIncognitoAsync(ct);
                 regular.SetModelIncognito(true);
                 Volatile.Write(ref current, new(isolated));
-                ui.Write("Incognito started. This text session uses a temporary copy of your memory and relationship. Type /stop incognito to return.");
+                ui.Write("Incognito started. This session uses a temporary copy of your memory and relationship. Type /stop incognito to return.");
             }
             else
             {

@@ -28,7 +28,6 @@ public sealed partial class CompanionEngine
         var sources = await sourceHistory.ForkInMemoryAsync(ct);
         var notes = await thoughtJournal.ForkInMemoryAsync(ct);
         var isolatedConfig = JsonSerializer.SerializeToElement(config, AppConfig.Json).Deserialize<AppConfig>(AppConfig.Json)!;
-        isolatedConfig.Audio.Enabled = false;
         isolatedConfig.Permissions.Microphone = false;
         isolatedConfig.Permissions.WriteFiles = false;
         isolatedConfig.Permissions.AllowAutonomousFileActions = false;

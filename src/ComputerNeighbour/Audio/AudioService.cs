@@ -129,7 +129,6 @@ public sealed class AudioService : IAsyncDisposable
         await speechGate.WaitAsync(token);
         try
         {
-            Directory.CreateDirectory(temporaryDirectory);
             if (!options.UsesExpressiveVoice)
             {
                 await NativeAudio.PlayAsync(await SynthesizePiperAsync(text, token), options.OutputDeviceId, token);
@@ -200,17 +199,25 @@ public sealed class AudioService : IAsyncDisposable
     private async Task<NativeAudio.PcmAudio> SynthesizePiperAsync(string text, CancellationToken token)
     {
         var executable = ResolveInside(options.PiperExecutable); var model = ResolveInside(options.PiperModel);
-        RequireFile(executable, "Piper"); RequireFile(model, "Piper voice"); RequireFile(model + ".json", "Piper voice metadata");
+        var config = model + ".json";
+        RequireFile(executable, "Piper"); RequireFile(model, "Piper voice"); RequireFile(config, "Piper voice metadata");
+
+        // Piper's raw pipe carries mono PCM16. The rate comes from the voice, with Piper's default when omitted.
+        using var voice = JsonDocument.Parse(await File.ReadAllTextAsync(config, token));
+        var sampleRate = 22050;
+        if (voice.RootElement.TryGetProperty("audio", out var audio) && audio.ValueKind == JsonValueKind.Object
+            && audio.TryGetProperty("sample_rate", out var rateSetting))
+            sampleRate = rateSetting.GetInt32();
+        if (sampleRate is < 8000 or > 192000) throw new InvalidDataException("Invalid Piper sample rate.");
+
         var rate = Math.Clamp(options.SpeechRate, 0.5, 2.0);
-        var wavePath = Path.Combine(temporaryDirectory, Guid.NewGuid().ToString("N") + ".wav");
-        try
-        {
-            await RunAsync(executable, ["--model", model, "--config", model + ".json", "--output_file", wavePath,
-                "--speaker", Math.Max(0, options.VoiceSpeakerId).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "--length_scale", (1 / rate).ToString(System.Globalization.CultureInfo.InvariantCulture)], text, token);
-            return NativeAudio.ReadWave(wavePath);
-        }
-        finally { TryDelete(wavePath); }
+        using var pcm = new MemoryStream();
+        await RunAsync(executable, ["--model", model, "--config", config, "--output_raw",
+            "--speaker", Math.Max(0, options.VoiceSpeakerId).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "--length_scale", (1 / rate).ToString(System.Globalization.CultureInfo.InvariantCulture)],
+            text.ReplaceLineEndings(" "), token, pcm);
+        if (pcm.Length == 0 || pcm.Length % 2 != 0) throw new InvalidDataException("Piper returned incomplete PCM16 audio.");
+        return new(pcm.ToArray(), sampleRate, 1);
     }
 
     private static IEnumerable<SpeechSentence> GroupSpeech(IReadOnlyList<SpeechSentence> sentences)
@@ -232,7 +239,8 @@ public sealed class AudioService : IAsyncDisposable
         yield return block;
     }
 
-    private async Task RunAsync(string executable, IReadOnlyList<string> arguments, string? input, CancellationToken token)
+    private async Task RunAsync(string executable, IReadOnlyList<string> arguments, string? input, CancellationToken token,
+        MemoryStream? pcm = null)
     {
         token.ThrowIfCancellationRequested();
         var start = CreateStartInfo(executable, arguments, redirectInput: input != null);
@@ -241,7 +249,8 @@ public sealed class AudioService : IAsyncDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.ProcessTimeoutSeconds, 10, 1800)));
         // Drain both streams immediately; noisy model loaders must not deadlock on a full pipe.
-        var outputTask = DrainBoundedAsync(process.StandardOutput, timeout.Token);
+        Task outputTask = pcm is null ? DrainBoundedAsync(process.StandardOutput, timeout.Token)
+            : CopyPcmAsync(process.StandardOutput.BaseStream, pcm, timeout.Token);
         var errorTask = DrainBoundedAsync(process.StandardError, timeout.Token);
         try
         {
@@ -250,16 +259,28 @@ public sealed class AudioService : IAsyncDisposable
                 await process.StandardInput.WriteLineAsync(input.AsMemory(), timeout.Token);
                 process.StandardInput.Close();
             }
+            await outputTask;
             await process.WaitForExitAsync(timeout.Token);
-            await outputTask; var error = await errorTask;
+            var error = await errorTask;
             if (process.ExitCode != 0) throw new IOException($"{Path.GetFileName(executable)} failed ({process.ExitCode}): {error}");
         }
         catch
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
             await process.WaitForExitAsync();
-            try { await Task.WhenAll(outputTask, errorTask); } catch (OperationCanceledException) { }
+            try { await Task.WhenAll(outputTask, errorTask); } catch { /* Keep the original process failure. */ }
             throw;
+        }
+    }
+
+    private static async Task CopyPcmAsync(Stream source, MemoryStream destination, CancellationToken token)
+    {
+        var buffer = new byte[16384];
+        int count;
+        while ((count = await source.ReadAsync(buffer, token)) > 0)
+        {
+            if (destination.Length + count > 100_000_000) throw new InvalidDataException("Speech output is too large.");
+            destination.Write(buffer, 0, count);
         }
     }
 

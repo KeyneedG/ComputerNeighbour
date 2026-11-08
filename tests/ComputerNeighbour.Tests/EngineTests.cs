@@ -120,6 +120,27 @@ internal static class EngineTests
             Check.Equal("Regular", reopened.Tasks.Items.Single().Title);
         });
 
+        await suite.Case("incognito keeps expressive speech and isolates mute changes", async root =>
+        {
+            var model = new ContextModel(Routing("chat", "quick"), "Hello. It's good to hear from you.");
+            await using var f = await Fixture.CreateAsync(root, model);
+            f.Config.Audio.Enabled = true;
+            f.Config.Audio.TtsEngine = "qwen";
+            f.Engine.Muted = true;
+
+            await using var sessions = new CompanionSession(f.Engine, f.Output);
+            await sessions.TryHandleCommandAsync("/start incognito", default);
+            var experiment = sessions.Current.Engine;
+            Check.True(experiment.Muted, "Incognito lost the current mute setting.");
+            experiment.Muted = false;
+            await experiment.RespondAsync("Hi Evelyn.", "user", false, false, default);
+            Check.Equal(1, model.SpeechPlans);
+
+            await sessions.TryHandleCommandAsync("/stop incognito", default);
+            Check.True(f.Engine.Muted, "The temporary unmute changed the regular session.");
+            Check.True(!Directory.Exists(Path.Combine(root, "data", "tmp", "audio")), "Speech playback created a temporary audio directory.");
+        });
+
         await suite.Case("the first pass selects quick, standard and deep dialogue without granting tools", async root =>
         {
             var model = new WorkflowModel(
@@ -852,8 +873,14 @@ internal static class EngineTests
     {
         public List<IReadOnlyList<ChatMessage>> Classifications {get;}=[];
         public List<IReadOnlyList<ChatMessage>> Answers {get;}=[];
+        public int SpeechPlans { get; private set; }
         public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct){Classifications.Add(messages.ToArray());return Task.FromResult(intent);}
         public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,bool json,CancellationToken ct){Answers.Add(messages.ToArray());return Task.FromResult(json?Decision(speak:false):answer);}
+        public Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages, int sentenceCount, CancellationToken ct)
+        {
+            SpeechPlans++;
+            return Task.FromResult<string?>(null);
+        }
     }
     private sealed class OpenDocuments(OpenTextDocument? document):IOpenDocumentReader
     {

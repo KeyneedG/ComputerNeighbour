@@ -110,30 +110,6 @@ internal static class NativeAudio
         writer.Write(Encoding.ASCII.GetBytes("data")); writer.Write(pcm.Length); writer.Write(pcm); return stream.ToArray();
     }
 
-    internal static PcmAudio ReadWave(string file)
-    {
-        using var reader = new BinaryReader(File.OpenRead(file));
-        if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "RIFF") throw new InvalidDataException("Speech output is not a RIFF wave file.");
-        reader.ReadUInt32(); if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "WAVE") throw new InvalidDataException("Speech output is not a wave file.");
-        WaveFormat format = default; byte[]? data = null;
-        while (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
-        {
-            var kind = Encoding.ASCII.GetString(reader.ReadBytes(4)); var length = reader.ReadUInt32();
-            var start = reader.BaseStream.Position;
-            if (length > reader.BaseStream.Length - start) throw new InvalidDataException("Truncated wave chunk.");
-            if (kind == "fmt " && length >= 16)
-            {
-                format = new WaveFormat { FormatTag = reader.ReadUInt16(), Channels = reader.ReadUInt16(), SamplesPerSecond = reader.ReadUInt32(), AverageBytesPerSecond = reader.ReadUInt32(), BlockAlign = reader.ReadUInt16(), BitsPerSample = reader.ReadUInt16() };
-            }
-            else if (kind == "data") { if (length > 100_000_000) throw new InvalidDataException("Speech file too large."); data = reader.ReadBytes((int)length); }
-            reader.BaseStream.Position = Math.Min(reader.BaseStream.Length, start + length + (length & 1));
-        }
-        if (data == null || data.Length == 0 || format.FormatTag != 1 || format.Channels is < 1 or > 2 || format.BitsPerSample != 16
-            || format.SamplesPerSecond is < 8000 or > 192000 || format.BlockAlign != format.Channels * 2 || data.Length % format.BlockAlign != 0)
-            throw new InvalidDataException("Speech output must be PCM16 mono/stereo audio.");
-        return new(data, (int)format.SamplesPerSecond, format.Channels);
-    }
-
     internal static async Task PlayAsync(PcmAudio audio, int device, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
