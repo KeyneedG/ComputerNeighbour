@@ -86,7 +86,8 @@ public static class ReplyQuality
         const string display=@"(?:your|the) (?:screen|desktop)";
         return Regex.IsMatch(answer,@"\bI (?:can see|see|notice|noticed) (?:that )?"+display+@"\s+(?:shows|displays|has|is showing)\b",RegexOptions.IgnoreCase)
             ||Regex.IsMatch(answer,@"(?:^|[.!?]\s+)(?:right now[,\s]+)?"+display+@"\s+(?:shows|displays|is showing)\b",RegexOptions.IgnoreCase)
-            ||Regex.IsMatch(answer,@"\bI (?:can see|see)\b[^.!?\r\n]{0,100}\bon "+display+@"\b|\bI (?:just |now )?(?:captured|checked|took a screenshot of|looked at) "+display+@" (?:just now|for this|now)\b|\bI just (?:captured|checked|looked at) "+display+@"\b",RegexOptions.IgnoreCase);
+            ||Regex.IsMatch(answer,@"\bI (?:can see|see)\b[^.!?\r\n]{0,100}\bon "+display+@"\b|\bI (?:just |now )?(?:captured|checked|took a screenshot of|looked at) "+display+@" (?:just now|for this|now)\b|\bI just (?:captured|checked|looked at) "+display+@"\b",RegexOptions.IgnoreCase)
+            ||Regex.IsMatch(answer,@"(?:^|[.!?]\s+)(?:(?:that|this|it) (?:looks|appears)|(?:the|your) (?:preview|render|image|photo|lighting|shadows?|skin tones?) (?:looks?|appears?|is|are))\s+(?:(?:a bit|a little|much|slightly|noticeably)\s+)?(?:lighter|darker|brighter|dimmer|sharper|blurrier|softer|clearer)\b[^.!?\r\n]{0,100}\b(?:now|this time)\b",RegexOptions.IgnoreCase);
     }
 
     public static bool DeniesToolAccess(string answer,bool screen,bool files,bool web)

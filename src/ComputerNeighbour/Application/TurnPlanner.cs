@@ -24,15 +24,20 @@ internal static class TurnPlanner
     private static readonly Regex PhotoRequest=new(
         @"^(?:(?:look at|take a look at|(?<report>describe)|what do you think (?:of|about)|how do you like)\s+(?:this|that|the)\s+(?:photo(?:graph)?|picture|image|shot)|(?:(?:посмотри|взгляни|глянь|(?<report>опиши|проанализируй))\s+(?:на\s+)?|(?:что (?:ты )?думаешь (?:о|об)|как тебе)\s+)(?:эт(?:а|у|о|ой|от|ом)\s+)?(?:фото\p{L}*|сним\p{L}*|кадр\p{L}*|картин\p{L}*|изображени\p{L}*))(?=\s*(?:[?!.,]|$|\b(?:on (?:my|the) screen|in detail|and|на экране|подробно|и)\b))",IgnoreCase);
     private static readonly Regex DirectLook=new(
-        @"^(?:(?:ну|тогда|then)[,\s]+)?(?:(?:ты\s+)?(?:сама|сам)\s+(?:посмотри|глянь|взгляни|проверь)|(?:посмотри|глянь|взгляни)(?:\s+(?:сама|сам))?|(?:look|take a look)(?:\s+(?:for yourself|yourself))?)[?.!\s]*$",IgnoreCase);
+        """
+        ^(?:(?:ну|тогда|then)[,\s]+)?(?:
+            (?:(?:ты\s+)?сам[а]?\s+(?:посмотри|глянь|взгляни|проверь)|(?:посмотри|глянь|взгляни)(?:\s+сам[а]?)?)
+            (?:[,\s]+(?:что\s+(?:вышло|получилось)|как\s+(?:вышло|получилось|теперь\s+выглядит)|(?:на\s+)?(?:результат|превью|рендер)))?
+          | (?:look|take\s+a\s+look)
+            (?:\s+(?:for\s+yourself|yourself|at\s+(?:(?:the|my|this)\s+(?:result|preview|render)|how\s+(?:it|this)\s+(?:turned\s+out|looks\s+now))))?
+        )[?.!\s]*$
+        """,IgnoreCase|RegexOptions.IgnorePatternWhitespace);
     private static readonly Regex CurrentActivityQuestion=new(
         @"(?:^|[,;:.!?]\s*)(?:(?:and|so|please)[,\s]+)*(?:what\s+am\s+i|(?:tell me\s+(?:(?:can|could)\s+(?:you\s+)?see\s+)?|(?:(?:can|could)\s+(?:you\s+)?)?(?:(?:actually|really)\s+)?see\s+)what\s+(?:am\s+i|i\s+am|i['’]m))\s+(?:currently\s+)?(?:doing|working on)(?=\s*(?:[?.!,]|$|\b(?:currently|right now|now|at the moment|on (?:my|the|this) (?:pc|computer|desktop|screen))\b))",IgnoreCase);
     private static readonly Regex OffScreenActivity=new(
         @"\b(?:in real life|in (?:my|the) (?:room|kitchen|garden)|through (?:my|the) (?:camera|webcam)|(?:doing|working|sitting|standing) outside)\b|в реальной жизни|в (?:комнате|кухне)|на улице|через (?:мою )?камеру",IgnoreCase);
     private static readonly Regex NoDesktopObservation=new(
-        @"\b(?:do not|don['’]t|never)\s+(?:look at|check|capture|record|take a screenshot of)\s+(?:(?:my|the)\s+)?(?:screen|desktop)\b|\b(?:do not|don['’]t)\s+take\s+(?:a\s+)?screenshot\b|не\s+(?:смотри|снимай|проверяй)\s+(?:на\s+)?(?:мой\s+)?(?:экран|рабочий стол)|не\s+делай\s+скрин",IgnoreCase);
-    private static readonly Regex VisualCue=new(
-        @"\b(?:screen|desktop|monitor|window|picture|image|photo|view|look|see|visible|here|on the left|on the right|currently doing|doing right now|working on right now)\b|экран|скрин|окно|видн|видишь|глянь|посмотр|фото|\b(?:тут|здесь|слева|справа)\b",IgnoreCase);
+        @"\b(?:do not|don['’]t|never)\s+(?:look at|check|capture|record|take a screenshot of)\s+(?:(?:my|the)\s+)?(?:screen|desktop)\b|\b(?:do not|don['’]t)\s+take\s+(?:a\s+)?screenshot\b|\bwithout\s+(?:taking\s+)?(?:a\s+)?screenshot\b|не\s+(?:смотри|снимай|проверяй)\s+(?:на\s+)?(?:мой\s+)?(?:экран|рабочий стол)|экран\s+не\s+(?:смотри|снимай|проверяй)|не\s+делай\s+скрин|\bбез\s+скрин",IgnoreCase);
 
     public static async Task<TurnPlan> PlanAsync(string input,string speaker,bool forceScreen,AppConfig config,
         IReadOnlyList<MemoryEntry> history,ITurnContextModel? model,CancellationToken ct)
@@ -45,7 +50,7 @@ internal static class TurnPlanner
             return direct with {Understanding=reading?.Understanding,Planning=reading is null?"original_fallback":"rules_and_context"};
         }
         var request=IntentRouter.CommandText(input,config.CharacterName);
-        if(Regex.IsMatch(request,"^[\"'«“]|^(?:не\\s+(?!а\\b)|don't\\s+|do not\\s+|she said\\b|he said\\b)",IgnoreCase))
+        if(Regex.IsMatch(request,"^[\"'«“>\x60]|^(?:не\\s+(?!а\\b)|don't\\s+|do not\\s+|she said\\b|he said\\b)",IgnoreCase))
             return await RefineKnownAsync(new(TurnIntent.Chat,AllowIncidentalScreen:false));
         var activity=CurrentActivityQuestion.Match(request);
         var subject=activity.Success?request[activity.Index..]:request;
@@ -98,13 +103,13 @@ internal static class TurnPlanner
             return new(TurnIntent.Chat,AllowIncidentalScreen:canObserve);
         var context=await ReadContextAsync(input,history,model,ct);
         if(context is null)return new(TurnIntent.Chat,AllowIncidentalScreen:canObserve,Planning:"original_fallback");
-        var asksForObservation=request.Contains('?')||Regex.IsMatch(request,@"^(?:look|check|tell|show|describe|what|where|how|посмотри|глянь|проверь|скажи|покажи|опиши|что|где|как|видишь)\b",IgnoreCase);
-        var currentVisualCue=canObserve&&asksForObservation&&context.Evidence.Length>=3&&input.Contains(context.Evidence,StringComparison.OrdinalIgnoreCase)
-            &&(VisualCue.IsMatch(context.Evidence)||situational&&VisualCue.IsMatch(input));
+        // The quoted words tie the decision to this turn. Their meaning can come from the conversation.
+        var currentEvidence=canObserve&&context.Evidence.Any(char.IsLetterOrDigit)&&Regex.IsMatch(Regex.Replace(input,@"\s+"," "),
+            @"(?<![\p{L}\p{N}])"+Regex.Escape(context.Evidence)+@"(?![\p{L}\p{N}])",IgnoreCase);
         var plan=context.Intent switch
         {
-            "screen" when currentVisualCue=>new(TurnIntent.Screen),
-            "screen_followup" when canObserve&&(situational||currentVisualCue)=>new(TurnIntent.ScreenFollowup),
+            "screen" when currentEvidence=>new(TurnIntent.Screen),
+            "screen_followup" when situational||currentEvidence=>new(TurnIntent.ScreenFollowup),
             "file_capability" when capability=>new(TurnIntent.FileCapability),
             "web_capability" when capability=>new(TurnIntent.WebCapability),
             "lookup_term" when term is not null&&config.Internet.LookupUnfamiliarTerms=>TermSearch(term,false),
@@ -116,11 +121,18 @@ internal static class TurnPlanner
     private static async Task<ContextReading?> ReadContextAsync(string input,IReadOnlyList<MemoryEntry> history,ITurnContextModel model,CancellationToken ct)
     {
         const string prompt="""
-        Prepare the latest user message for the next model. Do not answer it. Return JSON with intent, request, uncertainty, evidence.
+        Route the latest user message using the recent exchange. Return JSON with intent, request, uncertainty, evidence. Do not answer it.
+        First decide whether the next answer needs to inspect the current Windows desktop. If the recent exchange places a result, dialog, or other item on the user's screen now, choose screen for a request to judge, compare, identify, or troubleshoot what is visible. The latest message can be brief, indirect, or a response to an offer. Choose screen even if the user does not say "screen" or use a question mark.
+        Examples:
+        - Earlier user: "I just opened the updated preview and want to check the color." Latest: "А теперь как тебе" -> screen, evidence "А теперь как тебе".
+        - Earlier assistant: "Want me to look at the preview?" Latest: "да" -> screen, evidence "да".
+        - Earlier assistant: "Tell me when the result is ready for me to inspect." Latest: "Готово" -> screen, evidence "Готово".
+        - Earlier user: "I opened the preview." Latest: "How does white balance work?" -> chat, evidence "".
+        - Earlier user: "I'm working on my project." Latest: "The render finished." -> chat, evidence "".
         request: faithfully restate what the user says or wants in clear English, usually one sentence. Repair typos and spoken grammar. Resolve "it", "there", or an omitted subject only if the recent conversation identifies it. Preserve negation, conditions, quoted content, names and the distinction between a statement and a request. Do not make a request more permissive or add a task.
         uncertainty: a short note about a real ambiguity that matters to the answer, otherwise empty. Do not guess facts.
-        evidence: for a screen intent, copy the exact words in the latest user message that show they are asking about the visible computer. Otherwise empty.
-        screen: the user wants an observation of their current Windows desktop or app. Treat a question like "Can you see what I'm currently doing?" about their current computer work as a request to look now. Do not infer a screen request from a statement alone.
+        evidence: for screen or screen_followup, copy a short, exact phrase from the latest user message in its original language. Otherwise empty.
+        screen: the answer depends on what is visible on the user's computer now. Choose this for direct requests to look and for the contextual cases above.
         screen_followup: they refer to or ask about an earlier screenshot or screen capability, without asking for a fresh observation.
         file_capability or web_capability: they ask whether the app can read local files or use the internet, respectively.
         lookup_term: they ask for the meaning of an unfamiliar, ambiguous, or recent public term and a live definition would prevent guessing.

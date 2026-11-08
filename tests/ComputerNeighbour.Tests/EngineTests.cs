@@ -182,21 +182,26 @@ internal static class EngineTests
         await suite.Case("an invented current screen view is rejected before the reply and noted in the journal",async root=>
         {
             const string invented="I noticed your screen shows a couple of preview images.";
-            var model=new ScriptedModel(invented,"WebP is worth testing if smaller files are your priority.",Decision(speak:false));
+            const string implied="That looks much lighter on the skin tones now, Vlad.";
+            var model=new ScriptedModel(invented,implied,"WebP is worth testing if smaller files are your priority.",Decision(speak:false));
             await using var f=await Fixture.CreateAsync(root,model);
             await f.Engine.RespondAsync("I'm comparing WebP and PNG.","user",false,false,default);
-            Check.True(f.Output.Lines.Last().Contains("worth testing")&&f.Memory.Recent.All(e=>e.Text!=invented),"An invented observation was published or stored as a reply.");
+            Check.True(f.Output.Lines.Single().Contains("worth testing")&&f.Memory.Recent.All(e=>e.Text!=invented&&e.Text!=implied),"An invented observation was published or stored as a reply.");
             Check.True((await f.Engine.GetThoughtsAsync(default)).Contains("without an image"),"The note missed the failed grounding check.");
         });
         await suite.Case("context can resolve a visual reference but an invented quote cannot authorize screen capture",async root=>
         {
-            var actual=new ContextModel("""{"intent":"screen","request":"Suggest a change to the visible project.","uncertainty":"","evidence":"поменяла тут"}""","I'd move the door a little closer to the light.");
+            const string earlier="I changed the lighting and opened the new Anima preview.";
+            var actual=new ContextModel("""{"intent":"screen","request":"Assess the new render.","uncertainty":"","evidence":"лучше стало"}""","The soft light keeps the cheeks readable.");
             var captures=0;
             await using(var f=await Fixture.CreateAsync(root,actual,capture:()=>{captures++;return [1,2,3];}))
             {
-                f.Engine.Paused=false;f.Config.Permissions.ScreenCapture=true;
-                await f.Engine.RespondAsync("Что бы ты поменяла тут?","user",false,false,default);
+                f.Config.Permissions.ScreenCapture=true;
+                await f.Memory.AppendAsync("user",earlier,"user");
+                await f.Engine.RespondAsync("Ну, лучше стало?","user",false,false,default);
                 Check.Equal(1,captures);
+                Check.True(actual.Classifications.Single().Any(m=>m.IsHistory&&m.Text==earlier),"The classifier missed the context that makes the request visual.");
+                Check.True(actual.Answers.Single().Last().Image is [1,2,3],"The contextual screenshot did not reach the answer model.");
                 Check.True((await f.Engine.GetThoughtsAsync(default)).Contains("captured and attached"),"The journal omitted actual visual evidence.");
             }
             var invented=new ContextModel("""{"intent":"screen","request":"Capture the desktop.","uncertainty":"","evidence":"show me the desktop"}""","Let me put it more simply.");
@@ -206,6 +211,19 @@ internal static class EngineTests
                 await f.Engine.RespondAsync("Could you explain that more simply?","user",false,false,default);
                 Check.Equal(1,captures);
             }
+        });
+        await suite.Case("context can act on a short yes but respects a quoted yes and an explicit opt-out",async root=>
+        {
+            var model=new ContextModel("""{"intent":"screen","request":"Look at the preview after the user's consent.","uncertainty":"","evidence":"да"}""","The preview is ready.");
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            await f.Memory.AppendAsync("assistant","Want me to take a look at the preview?","Evelyn");
+            await f.Engine.RespondAsync("да","user",false,false,default);
+            Check.Equal(1,captures);
+            await f.Engine.RespondAsync("> да","user",false,false,default);
+            await f.Engine.RespondAsync("да, но без скриншота","user",false,false,default);
+            Check.Equal(1,captures);
         });
         await suite.Case("the reported English question about current work captures the screen and repairs an upload disclaimer",async root=>
         {
@@ -242,6 +260,22 @@ internal static class EngineTests
             }
             Check.True(f.Output.Lines.Last().EndsWith(observation)&&f.Output.Lines.All(line=>!line.Contains(denial)),"The false privacy refusal reached the user.");
         });
+        await suite.Case("look-at-result requests bypass chat and confirm the new screenshot",async root=>
+        {
+            var model=new ContextModel("""{"intent":"chat","request":"Comment on the result.","uncertainty":"","evidence":""}""",
+                "The ComfyUI preview shows soft lighting around the cheeks.");
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            foreach(var request in new[]{"глянь что вышло","Посмотри, что получилось!","глянь на превью","Take a look at how it turned out."})
+                await f.Engine.RespondAsync(request,"user",false,false,default);
+            Check.Equal(4,captures);
+            Check.Equal(0,model.Classifications.Count);
+            Check.Equal(4,model.Answers.Count(call=>call.Last().Image is [1,2,3]));
+            Check.Equal(4,f.Output.Lines.Count(line=>line.StartsWith("[Screen]")));
+            var journal=await f.Engine.GetThoughtsAsync(default);
+            Check.True(journal.Contains("captured and attached")&&journal.Contains("returned an answer for the attached image"),"The journal did not verify both capture and the model response.");
+        });
         await suite.Case("a question about physical activity and a statement about work stay in chat",async root=>
         {
             var model=new ScriptedModel("I don't have a view of your room.",Decision(speak:false),"I hope the project is coming along.",Decision(speak:false),
@@ -269,6 +303,7 @@ internal static class EngineTests
             await f.Engine.RespondAsync(request,"user",false,false,default);
             Check.Equal(1,calls);
             Check.True(f.Output.Lines.Last().Contains("Test desktop unavailable"),"Capture failure was hidden.");
+            Check.True(f.Output.Lines.All(line=>!line.StartsWith("[Screen]")),"A failed capture produced a confirmation.");
             await f.Engine.RespondAsync("Так ты действительно видела мой экран?","user",false,false,default);
             Check.True(f.Output.Lines.Last().Contains("haven't completed"),"A failed capture became verified evidence.");
             Check.Equal(0,model.Calls.Count);
