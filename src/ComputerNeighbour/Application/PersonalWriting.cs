@@ -11,6 +11,7 @@ internal sealed class PersonalFileConflict(string message) : IOException(message
 internal sealed class PersonalWriting(PortablePaths paths, FileWorkspace workspace)
 {
     internal const string Folder = "documents/evelyn-writing";
+    private const string SectionBreak = "\n\n---\n\n";
     private static readonly Regex LegacyName = new("^[0-9a-f]{32}\\.md$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex Device = new(@"^(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|$)", RegexOptions.IgnoreCase);
 
@@ -56,6 +57,25 @@ internal sealed class PersonalWriting(PortablePaths paths, FileWorkspace workspa
     {
         FullPath(path);
         return workspace.ReadForRevisionAsync(path, ct);
+    }
+
+    internal static string StoryText(string title, string[] scenes, bool draft)
+    {
+        var heading = "# " + title + "\n\n";
+        if (draft) heading += $"> Draft · {scenes.Length}/3 scenes\n\n";
+        return heading + string.Join(SectionBreak, scenes) + "\n";
+    }
+
+    internal async Task<string[]> RereadDraftAsync(string path, string expectedHash, int sceneCount, CancellationToken ct)
+    {
+        var text = await ReadAsync(path, ct);
+        if (HashText(text) != expectedHash) throw new PersonalFileConflict("The saved draft changed outside this project.");
+        var blocks = text.ReplaceLineEndings("\n").Split("\n\n", 3, StringSplitOptions.None);
+        if (blocks.Length != 3 || !blocks[1].StartsWith("> Draft · ", StringComparison.Ordinal))
+            throw new InvalidDataException("The saved draft could not be read as a story.");
+        var scenes = blocks[2].TrimEnd('\n').Split(SectionBreak, StringSplitOptions.None);
+        if (scenes.Length != sceneCount) throw new InvalidDataException("The saved draft has an unexpected number of scenes.");
+        return scenes;
     }
 
     internal async Task PublishAsync(string path, string text, string? originalHash, CancellationToken ct)

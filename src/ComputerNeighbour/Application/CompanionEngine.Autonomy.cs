@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ComputerNeighbour.Browser;
@@ -86,8 +87,8 @@ public sealed partial class CompanionEngine
             state = state with { Active = null, Previous = PersonalGoal.Train };
         }
         if (result is not null)
-            await life.SaveAsync(state.Remember(new(now, PersonalGoal.Train, "Working on my voice", result)) with
-                { Notice = new(now, result) }, ct);
+            await life.SaveAsync(state.Remember(new(now, PersonalGoal.Train, "Working on my voice", result))
+                .Offer(new(now, result, 1)), ct);
     }
 
     internal async Task<string?> DraftAlternativeAsync(DialogueExample first, CancellationToken ct)
@@ -131,6 +132,7 @@ public sealed partial class CompanionEngine
                     state = state.Schedule(new(PersonalGoal.Recover, Guid.NewGuid(), legacy.At, topic.Name)
                         { Challenge = legacy }, legacy.At, "Learn from a task that stopped.") with { Challenge = null };
             }
+            state = RegisterExistingArtifacts(state);
             if (state != life.State) await life.SaveAsync(state, ct);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
@@ -174,11 +176,16 @@ public sealed partial class CompanionEngine
     {
         if (IsIncognito) return "My personal diary is available in the regular session.";
         await life.LoadAsync(ct);
-        var recent = life.State.Journal.TakeLast(8);
-        return life.State.Journal.Length == 0 ? "I haven't written any personal diary entries yet." :
+        var state = life.State;
+        var recent = state.Journal.TakeLast(8);
+        var draftFiles = new[] { state.Active, state.Suspended }.Concat(state.Backlog.Select(item => item.Goal))
+            .OfType<PersonalGoalState>().Where(goal => goal.Goal == PersonalGoal.Write && goal.Project.DraftHash.Length > 0)
+            .Select(goal => $"- {PersonalTitle(goal)} · {goal.Project.Destination}").ToArray();
+        var entries = state.Journal.Length == 0 ? "I haven't finished any personal diary entries yet." :
             string.Join("\n\n", recent.Select(note =>
                 $"{note.At.ToLocalTime():MM-dd HH:mm} · {note.Title ?? note.Topic}\n{note.Observation}" +
                 (note.Reference.Length == 0 ? "" : "\nSource or artifact: " + note.Reference)));
+        return draftFiles.Length == 0 ? entries : entries + "\n\nDrafts on my shelf\n" + string.Join("\n", draftFiles);
     }
 
     internal string DescribePersonalLife(DateTimeOffset now)
@@ -191,7 +198,10 @@ public sealed partial class CompanionEngine
         else if (now < state.DeferredUntil) status += $" (deferred until {state.DeferredUntil.ToLocalTime():HH:mm})";
         var backlog = state.Backlog.OrderBy(item => item.Due).Select(item =>
             $"- {DescribeProject(item.Goal, now)} · {(item.Due <= now ? "due" : item.Due.ToLocalTime().ToString("MM-dd HH:mm"))} · {item.Reason}");
+        var breaks = state.Breaks.Where(item => item.Until > now).Select(item => $"{item.Kind} until {item.Until.ToLocalTime():HH:mm}");
+        var breakNote = string.Join(", ", breaks);
         return $"Personal life: {status}. Diary: {state.Journal.Length}. Practice examples: {state.Exercises.Length}.\n" +
+            (breakNote.Length == 0 ? "" : "Taking a break from " + breakNote + ".\n") +
             (state.Backlog.Length == 0 ? "For later: no projects queued." : "For later\n" + string.Join("\n", backlog));
     }
 
@@ -199,7 +209,7 @@ public sealed partial class CompanionEngine
     {
         if (goal.Project.TrainingPending) return $"{goal.Topic} · training and validation";
         var route = AutonomyPlanner.Plan(goal.Goal, goal.Facts, needs.Levels, action => !goal.Failed.Contains(action) &&
-            (action != PersonalAction.AskGoogle || config.Autonomy.GoogleAi && WorkDesktopEnabled && now >= life.State.GoogleAfter) &&
+            (action != PersonalAction.AskGoogle || GoogleReady(life.State, now, OperatingSystem.IsWindows() ? desktop.GetInteractiveIdleTime() : null)) &&
             (action != PersonalAction.Search || config.Permissions.SearchWeb && config.Permissions.ReadWeb));
         var step = route.Count == 0 ? "waiting for an available step" : route[0].ToString();
         var title = goal.Project.Title.Length == 0 ? goal.Topic : goal.Project.Title;
@@ -232,22 +242,20 @@ public sealed partial class CompanionEngine
     internal async Task<bool> TickPersonalLifeAsync(DateTimeOffset now, TimeSpan? idle, bool quiet, bool canSpeak,
         DialogueLearning? learning, Func<CancellationToken, ValueTask> trainingDone, CancellationToken activity, CancellationToken shutdown)
     {
-        if (!AutonomyEnabled || BackgroundDeferred(now) || learning?.IsTraining == true) return false;
+        if (!AutonomyEnabled || HasPriorityWork || BackgroundDeferred(now) || learning?.IsTraining == true) return false;
         await InitializePersonalLifeAsync(activity);
         if (!AutonomyEnabled || BackgroundDeferred(now)) return false;
+        await CheckPersonalArtifactsAsync(now, activity);
         var state = life.State;
         var isIdle = idle >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds);
-        if (canSpeak && !quiet && !IsResting && CanInitiate && config.Proactive.Enabled && !WaitingForCompanyReply &&
-            idle is { } observed && observed.TotalSeconds < config.Proactive.AwayAfterSeconds &&
-            UnansweredMessages < config.Proactive.MaxUnansweredMessages && now - LastInteraction > TimeSpan.FromSeconds(45) &&
-            now - state.LastNotice >= TimeSpan.FromMinutes(12 * InitiativeIntervalScale) &&
-            state.Notice is { } notice && now - notice.At < TimeSpan.FromDays(1))
+        if (canSpeak && HasPersonalNotice(now, idle, quiet) && state.Notice is { } notice)
         {
             await DeliverReplyAsync(notice.Text, true, activity);
             await life.SaveAsync(state with { Notice = null, LastNotice = now }, shutdown);
             return true;
         }
         if (now < state.NextStep) return false;
+        if (await TakeActivityBreakAsync(state, now, activity)) return false;
 
         var active = state.Active;
         if (active is { Goal: PersonalGoal.Train, Project.TrainingPending: true })
@@ -256,10 +264,7 @@ public sealed partial class CompanionEngine
             return false;
         }
         var webReady = config.Permissions.SearchWeb && config.Permissions.ReadWeb && now >= state.ResearchAfter;
-        var googleReady = config.Autonomy.GoogleAi && isIdle && now >= state.GoogleAfter && WorkDesktopEnabled &&
-            accessMode != AccessMode.Ask && config.Permissions.OpenApplications && config.Permissions.SearchWeb &&
-            config.Permissions.ReadBrowser && config.Browser.Enabled &&
-            config.Browser.AllowedProcesses.Any(name => WindowsDesktop.IsWorkApplication("chrome", name));
+        var googleReady = GoogleReady(state, now, idle);
         var canTrain = learning is not null && config.Autonomy.TrainLora && !quiet &&
             idle >= TimeSpan.FromMinutes(config.Autonomy.TrainingIdleMinutes) && now >= state.TrainingAfter;
         var batch = canTrain ? await learning!.GetAutomaticBatchAsync(state.Exercises, activity) : null;
@@ -276,7 +281,7 @@ public sealed partial class CompanionEngine
             PersonalAction.ReadArticle => config.Permissions.ReadWeb,
             PersonalAction.ReadFile => config.Permissions.ReadFiles && config.Permissions.ReadableDirectories.Count > 0,
             PersonalAction.ReadDiary => state.Journal.Any(note => note.Goal != PersonalGoal.Revisit && note.Observation != Stalled),
-            PersonalAction.Write => writingReady && (project?.Goal != PersonalGoal.ContinueStory || config.Permissions.ReadFiles),
+            PersonalAction.Write or PersonalAction.SaveDraft => writingReady && config.Permissions.ReadFiles,
             PersonalAction.LoadStory or PersonalAction.TitleEntry or PersonalAction.RenameEntry => writingReady && config.Permissions.ReadFiles,
             PersonalAction.Sketch => sketchAllowed,
             PersonalAction.Retry => project?.Challenge is { } challenge && RecoveryTopics.ContainsKey(challenge.Tool) &&
@@ -285,6 +290,7 @@ public sealed partial class CompanionEngine
             _ => true
         };
         bool Viable(PersonalGoal goal) =>
+            ActivityAvailable(state, goal, now) &&
             (goal != PersonalGoal.Company || googleReady || webReady && needs.Levels.Loneliness >= .65) &&
             (goal != PersonalGoal.Sketch || sketchReady) &&
             goal != PersonalGoal.Recover &&
@@ -301,7 +307,7 @@ public sealed partial class CompanionEngine
         else if (active is null)
         {
             var prioritiseWeb = HasQueueRoom(state) && AutonomyPlanner.ResearchIsDue(state.RecentProjects) && Viable(PersonalGoal.Explore);
-            var due = state.Backlog.Where(item => item.Due <= now).OrderBy(item => item.Due)
+            var due = state.Backlog.Where(item => item.Due <= now && ActivityAvailable(state, item.Goal.Goal, now)).OrderBy(item => item.Due)
                 .FirstOrDefault(item => Route(item.Goal).Count > 0);
             if (due is not null && (!prioritiseWeb || due.Goal.Goal is PersonalGoal.Explore or PersonalGoal.Company or PersonalGoal.Recover))
             {
@@ -312,7 +318,8 @@ public sealed partial class CompanionEngine
             {
                 if (!HasQueueRoom(state)) return false;
                 if (!prioritiseWeb && writingReady && config.Permissions.ReadFiles && now >= state.NextTitleAt &&
-                    state.Previous != PersonalGoal.NameEntry && NextUntitledEntry(state) is { } old)
+                    state.Previous != PersonalGoal.NameEntry && ActivityAvailable(state, PersonalGoal.NameEntry, now) &&
+                    NextUntitledEntry(state) is { } old)
                 {
                     active = NamingGoal(old, now);
                     state = state with { NextTitleAt = now.AddMinutes(4) };
@@ -326,6 +333,8 @@ public sealed partial class CompanionEngine
             }
             state = state.Started(active.Goal);
         }
+        if (active.Goal == PersonalGoal.Write && writingReady)
+            active = PrepareStoryCheckpoint(active);
         var plan = Route(active);
         if (plan.Count == 0)
         {
@@ -341,20 +350,24 @@ public sealed partial class CompanionEngine
             await life.SaveAsync(state with { Active = active with { WakeAt = wake }, NextStep = wake }, activity);
             return false;
         }
-        if (action == PersonalAction.AskGoogle) state = state with { GoogleAfter = now.AddMinutes(30) };
+        if (action == PersonalAction.AskGoogle)
+            state = (state with { GoogleAfter = now.AddMinutes(30) })
+                .LogWeb(new(now, "Ask Google", active.Topic, "Browser attempt started"));
         if (state != life.State) await life.SaveAsync(state, activity);
         activity.ThrowIfCancellationRequested();
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(activity);
         var timeout = action switch
         {
-            PersonalAction.AskGoogle => 110,
+            PersonalAction.AskGoogle or PersonalAction.InspectImage => 110,
             PersonalAction.Outline or PersonalAction.Opening or PersonalAction.TurningPoint or PersonalAction.Ending or
-                PersonalAction.ContinueStory or PersonalAction.DrawDraft or PersonalAction.Review or PersonalAction.Revise =>
+                PersonalAction.ContinueStory or PersonalAction.DrawDraft or PersonalAction.Review or PersonalAction.Revise or PersonalAction.ReviseStory =>
                 Math.Clamp(config.Model.RequestTimeoutSeconds, 55, 120),
             _ => 55
         };
         deadline.CancelAfter(TimeSpan.FromSeconds(timeout));
+        var started = Stopwatch.GetTimestamp();
+        var gap = isIdle ? Math.Max(4, config.Autonomy.StepSeconds / 3) : config.Autonomy.StepSeconds;
         PersonalLifeState next;
         try
         {
@@ -368,11 +381,14 @@ public sealed partial class CompanionEngine
         {
             needs.NotePersonalStep(.015, failed: true);
             var retry = PrepareFailedStep(active, action, ex);
-            var failed = state with { Active = retry,
+            var failed = TrackActivity(state, active.Goal, Stopwatch.GetElapsedTime(started).TotalSeconds + gap) with { Active = retry,
                 NextStep = now.AddSeconds(config.Autonomy.StepSeconds) };
             if (action == PersonalAction.Search) failed = failed with { ResearchAfter = now.AddMinutes(5) };
             if (action == PersonalAction.Train) failed = failed with { TrainingAfter = now.AddHours(4) };
             var reason = deadline.IsCancellationRequested ? "Step timed out." : ClipWorkText(ex.Message, 200);
+            if (action is PersonalAction.Search or PersonalAction.ReadArticle or PersonalAction.AskGoogle or PersonalAction.InspectImage)
+                failed = failed.LogWeb(new(now, action == PersonalAction.AskGoogle ? "Ask Google" : action.ToString(), active.Topic,
+                    action == PersonalAction.AskGoogle ? reason + " Public article fallback is available when web search is enabled." : reason));
             if (Route(retry).Count == 0)
                 await DeferProjectAsync(failed, retry, now, reason, shutdown);
             else
@@ -380,12 +396,20 @@ public sealed partial class CompanionEngine
             ui.Write($"[Personal life · {action}] {reason}");
             return false;
         }
+        catch (OperationCanceledException) when (!shutdown.IsCancellationRequested && activity.IsCancellationRequested &&
+            action == PersonalAction.AskGoogle)
+        {
+            await life.SaveAsync(state.LogWeb(new(now, "Ask Google", active.Topic, "Browser attempt interrupted")), shutdown);
+            throw;
+        }
+        next = TrackActivity(next, active.Goal, Stopwatch.GetElapsedTime(started).TotalSeconds + gap);
         if (action == PersonalAction.Train)
         {
             await life.SaveAsync(next with { Active = active with { Project = active.Project with { TrainingPending = true } } }, shutdown);
             return false;
         }
         var progress = AdvanceProject(next.Active!, action, webReady);
+        next = RememberPersonalStep(next, progress, action, now);
         if (action == PersonalAction.Review && progress.Facts.HasFlag(PersonalFact.Reviewed) &&
             !progress.Facts.HasFlag(PersonalFact.Accepted) &&
             (progress.Project.Review!.Decision == "defer" || progress.Project.Revisions >= RevisionBudget))
@@ -399,7 +423,7 @@ public sealed partial class CompanionEngine
             Active = complete ? next.Suspended : progress,
             Suspended = complete ? null : next.Suspended,
             Previous = complete && active.Goal != PersonalGoal.Rest ? active.Goal : next.Previous,
-            NextStep = DateTimeOffset.UtcNow.AddSeconds(isIdle ? Math.Max(4, config.Autonomy.StepSeconds / 3) : config.Autonomy.StepSeconds)
+            NextStep = DateTimeOffset.UtcNow.AddSeconds(gap)
         }, shutdown);
         if (action == PersonalAction.Sleep) needs.NoteRest();
         else needs.NotePersonalStep(AutonomyPlanner.Effort(action),
@@ -415,11 +439,18 @@ public sealed partial class CompanionEngine
 
     private const string Stalled = "I set this aside after the available approaches stalled.";
 
-    private bool CanWritePersonalEntries() =>
-        accessMode != AccessMode.Ask && config.Permissions.AllowAutonomousFileActions && config.Permissions.WriteFiles &&
-        config.Permissions.WritableDirectories.Any(directory =>
-            paths.Inside(PersonalWriting.Folder + "/probe.md").StartsWith(Path.TrimEndingDirectorySeparator(paths.Inside(directory)) +
-                Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+    private bool CanWritePersonalEntries()
+    {
+        if (accessMode == AccessMode.Ask || !config.Permissions.AllowAutonomousFileActions || !config.Permissions.WriteFiles) return false;
+        try
+        {
+            var target = paths.Inside(PersonalWriting.Folder + "/probe.md");
+            return config.Permissions.WritableDirectories.Any(directory =>
+                target.StartsWith(Path.TrimEndingDirectorySeparator(paths.Inside(directory)) +
+                    Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException) { return false; }
+    }
 
     private static bool HasQueueRoom(PersonalLifeState state) =>
         state.Backlog.Length + (state.Active is not null && state.Active.Goal != PersonalGoal.Rest ? 1 : 0) +
@@ -453,7 +484,7 @@ public sealed partial class CompanionEngine
         if (goal.Goal == PersonalGoal.ContinueStory)
             return retry with { Facts = PersonalFact.None, Material = "",
                 Project = new() { Title = goal.Project.Title, Visit = goal.Project.Visit } };
-        if (goal.Goal is PersonalGoal.NameEntry or PersonalGoal.Write)
+        if (goal.Goal == PersonalGoal.NameEntry || goal.Goal == PersonalGoal.Write && goal.Project.DraftHash.Length == 0)
             return retry with { Facts = goal.Facts & ~PersonalFact.Reserved,
                 Project = goal.Project with { Destination = "", OriginalHash = "" } };
         return retry;
@@ -464,9 +495,11 @@ public sealed partial class CompanionEngine
         var review = goal.Project.Review;
         if (action == PersonalAction.Review && review?.Decision == "research" && webReady && goal.Project.Revisions < RevisionBudget)
         {
-            var facts = goal.Facts & ~(PersonalFact.ReadMaterial | PersonalFact.Drafted | PersonalFact.Reviewed | PersonalFact.Accepted);
+            var facts = goal.Facts & ~(PersonalFact.ReadMaterial | PersonalFact.Drafted | PersonalFact.Reviewed |
+                PersonalFact.Accepted | PersonalFact.ImagesConsidered);
             if (goal.Links.Length == 0) facts &= ~PersonalFact.FoundSource;
-            return goal with { Facts = facts, Project = goal.Project with { Revisions = goal.Project.Revisions + 1 } };
+            return goal with { Facts = facts, Images = [], Project = goal.Project with
+                { Revisions = goal.Project.Revisions + 1, ImageNote = "" } };
         }
         var accepted = review?.Decision is "accept" or "keep";
         return goal with { Facts = AutonomyPlanner.Advance(action, goal.Facts, accepted) };
@@ -504,7 +537,8 @@ public sealed partial class CompanionEngine
                     !link.Equals(goal.Reference, StringComparison.OrdinalIgnoreCase))
                     .Distinct(StringComparer.OrdinalIgnoreCase).Take(3).ToArray();
                 if (links.Length == 0) throw new IOException("I couldn't find a readable source for this topic.");
-                return state with { Active = goal with { Links = links } };
+                return state.LogWeb(new(now, "Searched the web", goal.Topic, $"{links.Length} candidate pages via {search.Provider}"))
+                    with { Active = goal with { Links = links } };
             case PersonalAction.ReadArticle:
                 for (var index = 0; index < goal.Links.Length; index++)
                 {
@@ -514,16 +548,20 @@ public sealed partial class CompanionEngine
                     {
                         var article = await web.ReadAsync(link, ct);
                         if (article.Text.Length < 180 || !PersonalWebLink(article.Url)) continue;
-                        return state with { Active = goal with { Material = ClipPersonal(article.Text, 6000),
-                            Reference = article.Url, Links = goal.Links[(index + 1)..] } };
+                        return state.LogWeb(new(now, "Read an article", goal.Topic, ClipPersonal(article.Title, 140), article.Url))
+                            with { Active = goal with { Material = ClipPersonal(article.Text, 6000), Images = article.Images.Take(4).ToArray(),
+                                Reference = article.Url, Links = goal.Links[(index + 1)..] } };
                     }
                     catch (Exception ex) when (ex is IOException or HttpRequestException or UnauthorizedAccessException or InvalidDataException or TimeoutException) { }
                 }
                 throw new IOException("None of the search results exposed enough article text.");
             case PersonalAction.AskGoogle:
                 var answer = await AskPersonalGoogleAsync(topic.Question, ct);
-                return state with { Active = goal with { Material = ClipPersonal(answer.Text, 6000),
+                return state.LogWeb(new(now, "Ask Google", topic.Name, "Verified a completed reply in Chrome"))
+                    with { Active = goal with { Material = ClipPersonal(answer.Text, 6000),
                     Reference = "Google AI Mode (unverified)" } };
+            case PersonalAction.InspectImage:
+                return await LookAtPublicImageAsync(state, goal, now, ct);
             case PersonalAction.ReadFile:
                 var reader = PersonalFileReader();
                 var candidates = await Task.Run(() => reader.SampleDiskFiles(ct), ct);
@@ -552,7 +590,7 @@ public sealed partial class CompanionEngine
         }
     }
 
-    private async Task<GoogleVisualResult> AskPersonalGoogleAsync(string question, CancellationToken ct)
+    private async Task<GoogleVisualResult> AskPersonalGoogleAsync(string question, CancellationToken ct, bool explicitTest = false)
     {
         Volatile.Write(ref personalBrowserInUse, 1);
         try
@@ -560,7 +598,7 @@ public sealed partial class CompanionEngine
             if (PersonalGoogleOverride is { } ask) return await ask(question, ct);
             return await (googleVisualSearch ??= new GoogleAiMode(desktop, paths.Inside("data/tmp")))
                 .AskAsync(question, Path.GetDirectoryName(paths.Inside("data/autonomy/chrome/Local State"))!,
-                    () => desktop.GetInteractiveIdleTime() >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds), ct);
+                    () => explicitTest || desktop.GetInteractiveIdleTime() >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds), ct);
         }
         finally { Volatile.Write(ref personalBrowserInUse, 0); }
     }

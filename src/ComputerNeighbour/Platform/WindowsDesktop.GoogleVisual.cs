@@ -76,6 +76,7 @@ public sealed partial class WindowsDesktop
             start.ArgumentList.Add("--no-first-run");
             start.ArgumentList.Add("--no-default-browser-check");
             start.ArgumentList.Add("--disable-background-mode");
+            start.ArgumentList.Add("--force-renderer-accessibility");
         }
         start.ArgumentList.Add("--new-window");
         start.ArgumentList.Add("https://www.google.com/ai");

@@ -118,6 +118,7 @@ public static class ReplyQuality
             @"(?:(?:open(?:ing)?|launch(?:ing)?|switch(?:ing)? to)" + appTarget +
             @"|(?:sav(?:e|ing)|writ(?:e|ing)|typ(?:e|ing)|edit(?:ing)?|creat(?:e|ing)|draw(?:ing)?|sketch(?:ing)?|click(?:ing)?|mov(?:e|ing)|press(?:ing)?)\b[^.!?\r\n]{0,100}\b" + computerTarget + @"\b)",
             ignoreCase) ||
+            Regex.IsMatch(answer, firstPerson + @"(?:open(?:ing)?\s+(?:x(?:\.com)?|twitter)\b|(?:post(?:ing)?|publish(?:ing)?|submit(?:ting)?)\s+(?:it|that|(?:the|my|your|a) (?:post|note|draft))\b)", ignoreCase) ||
             Regex.IsMatch(answer, firstPerson + @"renam(?:e|ing)\b|\bI(?:['’]ve| have)?\s+(?:just |already )?renamed\b|" +
                 @"\bI can rename (?:them|it|(?:the|my) (?:entries|files|documents))\b", ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve| have)?\s+(?:(?:just|already|successfully)\s+)*(?:opened|launched|switched to)" + appTarget, ignoreCase) ||

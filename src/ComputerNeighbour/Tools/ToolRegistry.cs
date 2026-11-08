@@ -97,6 +97,7 @@ public sealed class ToolRegistry(ToolContext context)
 }
 
 public sealed record PublicDocument(string Url,string ContentType,string Text);
+internal sealed record PublicWebImage(string Url, string ContentType, byte[] Bytes);
 public static class PublicWeb
 {
     public static bool IsPublic(IPAddress ip)
@@ -109,6 +110,21 @@ public static class PublicWeb
     }
     public static async Task<string> ReadAsync(string url,CancellationToken ct)=>(await ReadDocumentAsync(url,ct)).Text;
     public static async Task<PublicDocument> ReadDocumentAsync(string url,CancellationToken ct)
+    {
+        var resource = await ReadResourceAsync(url, image: false, ct);
+        return new(resource.Url, resource.Type, DecodeDocument(resource.Bytes, resource.Charset));
+    }
+
+    internal static async Task<PublicWebImage> ReadImageAsync(string url, CancellationToken ct)
+    {
+        var resource = await ReadResourceAsync(url, image: true, ct);
+        if (!PublicImageFormat.IsSupported(resource.Bytes, resource.Type))
+            throw new InvalidDataException("The picture is not a supported size or does not match its PNG/JPEG media type.");
+        return new(resource.Url, resource.Type, resource.Bytes);
+    }
+
+    private static async Task<(string Url, string Type, string? Charset, byte[] Bytes)> ReadResourceAsync(
+        string url, bool image, CancellationToken ct)
     {
         using var handler = new SocketsHttpHandler { AllowAutoRedirect=false, UseProxy=false, ConnectTimeout=TimeSpan.FromSeconds(10), AutomaticDecompression=DecompressionMethods.All };
         handler.ConnectCallback=async (context,token) =>
@@ -125,7 +141,7 @@ public static class PublicWeb
             throw new HttpRequestException("Unable to connect.",last);
         };
         using var client=new HttpClient(handler) { Timeout=TimeSpan.FromSeconds(25) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("ComputerNeighbour/0.1 (article reader)");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("ComputerNeighbour/0.1 (public web reader)");
         var uri=new Uri(url,UriKind.Absolute);
         for(int redirects=0;redirects<5;redirects++)
         {
@@ -133,12 +149,14 @@ public static class PublicWeb
             using var response=await client.GetAsync(uri,HttpCompletionOption.ResponseHeadersRead,ct);
             if((int)response.StatusCode is >=300 and <=399 && response.Headers.Location is {} location) { uri=new Uri(uri,location); continue; }
             response.EnsureSuccessStatusCode();
-            var type=response.Content.Headers.ContentType?.MediaType??"";
-            if(!type.StartsWith("text/",StringComparison.OrdinalIgnoreCase) && type is not ("application/json" or "application/xml" or "application/rss+xml" or "application/atom+xml" or "application/xhtml+xml")) throw new HttpRequestException("URL does not return readable text, HTML or RSS.");
+            var type=response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant()??"";
+            if (image ? type is not ("image/png" or "image/jpeg") :
+                !type.StartsWith("text/",StringComparison.OrdinalIgnoreCase) && type is not ("application/json" or "application/xml" or "application/rss+xml" or "application/atom+xml" or "application/xhtml+xml"))
+                throw new HttpRequestException(image ? "URL does not return a public PNG or JPEG image." : "URL does not return readable text, HTML or RSS.");
             await using var stream=await response.Content.ReadAsStreamAsync(ct);
             using var output=new MemoryStream(); var buffer=new byte[8192]; int n;
-            while((n=await stream.ReadAsync(buffer,ct))>0) { if(output.Length+n>2_000_000) throw new IOException("Article exceeds 2 MB."); output.Write(buffer,0,n); }
-            return new(uri.AbsoluteUri,type,DecodeDocument(output.ToArray(),response.Content.Headers.ContentType?.CharSet));
+            while((n=await stream.ReadAsync(buffer,ct))>0) { if(output.Length+n>2_000_000) throw new IOException("Public resource exceeds 2 MB."); output.Write(buffer,0,n); }
+            return (uri.AbsoluteUri,type,response.Content.Headers.ContentType?.CharSet,output.ToArray());
         }
         throw new HttpRequestException("Too many redirects.");
     }

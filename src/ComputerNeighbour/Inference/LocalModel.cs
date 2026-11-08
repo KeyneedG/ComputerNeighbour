@@ -8,7 +8,10 @@ using ComputerNeighbour.Platform;
 
 namespace ComputerNeighbour.Inference;
 
-public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
+public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false)
+{
+    public string ImageMediaType { get; init; } = "image/png";
+}
 public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep, RequestedSketch, SketchReview, WorkSearch, SketchRevision, SketchInspection, ScreenRelevance, PersonalThought, PersonalOutline, PersonalScene, PersonalReview }
 public interface IChatModel
 {
@@ -295,7 +298,7 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
     private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null,int thinkingBudget=0,bool useAdapter=false)
     {
         messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);
-        var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:image/png;base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
+        var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:" + (m.ImageMediaType == "image/jpeg" ? "image/jpeg" : "image/png") + ";base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
         var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = maxTokens??(json||dialogue ? options.MaxReplyTokens : 1800), ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = thinkingBudget>0 } };
         if(Volatile.Read(ref incognito)!=0)body["cache_prompt"]=false;
         if(dialogue&&useAdapter&&LoadedAdapter is not null)body["lora"]=new[] {new {id=0,scale=1.0}};

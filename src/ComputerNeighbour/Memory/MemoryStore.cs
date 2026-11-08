@@ -19,13 +19,21 @@ internal sealed record WorkArtifact(WorkArtifactKind Kind, string Path, string G
 internal sealed record WorkTask(string Title, string Goal, string Progress, string NextStep,
     IReadOnlyList<string> References, DateTimeOffset? ReminderAt = null);
 
+internal enum WorkflowStatus { Running, Blocked, Approval, Draft, ComposerOpened, Finished, Cancelled }
+internal sealed record CurrentWorkflow(string Request, string Speaker, WorkflowStatus Status, string Detail,
+    bool MayHaveChangedComputer = false, string? Draft = null)
+{
+    internal bool Pending => Status is not (WorkflowStatus.Finished or WorkflowStatus.Cancelled);
+}
+
 internal sealed record WorkTaskState(IReadOnlyList<WorkTask> Items, string? ActiveTitle = null)
 {
+    public CurrentWorkflow? Current { get; init; }
     internal WorkTask? Active => Items.FirstOrDefault(t => t.Title == ActiveTitle);
 
     internal WorkTaskState WithTask(WorkTask task, bool activate = true) =>
-        new([.. Items.Where(t => !t.Title.Equals(task.Title, StringComparison.OrdinalIgnoreCase)), task],
-            activate ? task.Title : ActiveTitle);
+        this with { Items = [.. Items.Where(t => !t.Title.Equals(task.Title, StringComparison.OrdinalIgnoreCase)), task],
+            ActiveTitle = activate ? task.Title : ActiveTitle };
 }
 
 /// <summary>The snapshot is authoritative; the rotating journal is a bounded audit trail. Never persist private model reasoning.</summary>
@@ -306,7 +314,9 @@ public sealed class MemoryStore
             state.Recent.Any(e => e is null || e.Text is null || e.Role is null || e.SpeakerId is null) ||
             state.Tasks?.Items is null || state.Tasks.Items.Any(t => t is null || string.IsNullOrWhiteSpace(t.Title) ||
                 t.Goal is null || t.Progress is null || t.NextStep is null || t.References is null ||
-                t.References.Any(string.IsNullOrWhiteSpace)))
+                t.References.Any(string.IsNullOrWhiteSpace)) ||
+            state.Tasks.Current is { } current && (!Enum.IsDefined(current.Status) || current.Request is not { Length: > 0 and <= 8000 } ||
+                string.IsNullOrWhiteSpace(current.Speaker) || current.Detail is not { Length: <= 1000 } || current.Draft is { Length: > 240 }))
             throw new InvalidDataException("Unsupported or incomplete memory snapshot.");
         return state;
     }

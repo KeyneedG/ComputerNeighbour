@@ -22,10 +22,12 @@ public sealed record NeedLevels
     public double Playfulness { get; init; } = .52;
     public double Ambition { get; init; } = .50;
     public double Contentment { get; init; } = .54;
+    public double Monotony { get; init; }
+    public double Anger { get; init; }
     public DateTimeOffset? LastSketchAt { get; init; }
 
     internal bool IsValid => new[] { Boredom, Loneliness, Hurt, Energy, Fatigue, Curiosity, Inspiration, Excitement,
-        Focus, Confidence, Frustration, Calm, Novelty, Reflection, Persistence, Playfulness, Ambition, Contentment }
+        Focus, Confidence, Frustration, Calm, Novelty, Reflection, Persistence, Playfulness, Ambition, Contentment, Monotony, Anger }
         .All(value => double.IsFinite(value) && value is >= 0 and <= 1);
 }
 
@@ -56,7 +58,7 @@ internal sealed class CompanionNeeds(NeedsOptions options,NeedLevels initial)
         {
             Boredom=Math.Min(1,Levels.Boredom+elapsed*Threshold/options.BoredomMinutes),
             Loneliness=Math.Min(1,Levels.Loneliness+elapsed*Threshold/options.LonelinessMinutes),
-            Hurt=hurt
+            Hurt=hurt, Anger=Bound(Levels.Anger-.022*elapsed)
         };
         if (!personalLife || resting) return;
         Levels = Levels with
@@ -117,11 +119,25 @@ internal sealed class CompanionNeeds(NeedsOptions options,NeedLevels initial)
         Inspiration = Bound(Levels.Inspiration + .08), Playfulness = Bound(Levels.Playfulness + .09)
     };
 
+    public void NoteSustainedActivity(double proportion)
+    {
+        var monotony = Bound(proportion);
+        var increase = Math.Max(0, monotony - Levels.Monotony);
+        Levels = Levels with { Monotony = monotony, Boredom = Bound(Math.Max(Levels.Boredom + increase * .82, monotony * .82)) };
+    }
+
+    public void NoteMissingWork(int count) => Levels = Levels with
+    {
+        Anger = Bound(Levels.Anger + .40 + .09 * count),
+        Frustration = Bound(Levels.Frustration + .22),
+        Contentment = Bound(Levels.Contentment - .24)
+    };
+
     private static double Bound(double value) => Math.Clamp(value, 0, 1);
     private static double Toward(double value, double target, double amount) => value + (target - value) * amount;
 
-    public bool WantsCompany(TimeSpan? idle)=>options.Enabled&&options.InviteWhenLonely&&!WaitingForReply&&
-        Levels.Loneliness>=Threshold&&IsPresent(idle);
+    public bool WantsCompany(TimeSpan? idle, bool personal = false)=>options.Enabled&&options.InviteWhenLonely&&!WaitingForReply&&
+        Levels.Loneliness>=(personal ? .55 : Threshold)&&IsPresent(idle);
 
     public bool WantsToSketch(DateTimeOffset now,TimeSpan? idle)=>options.Enabled&&options.DrawWhenBored
         &&Levels.Boredom>=Threshold&&idle>=TimeSpan.FromSeconds(options.SketchIdleSeconds)
@@ -129,6 +145,7 @@ internal sealed class CompanionNeeds(NeedsOptions options,NeedLevels initial)
         &&(lastSketchAttempt is not {} tried||now-tried>=TimeSpan.FromMinutes(5));
 
     public void NoteInvitation(DateTimeOffset now){invitation=now;feltOverlooked=false;}
+    public void EndInvitation(){invitation=null;feltOverlooked=false;}
     public void NoteSketchAttempt(DateTimeOffset now)=>lastSketchAttempt=now;
     public void NoteSketch(DateTimeOffset now)=>Levels=Levels with {Boredom=.12,LastSketchAt=now};
 

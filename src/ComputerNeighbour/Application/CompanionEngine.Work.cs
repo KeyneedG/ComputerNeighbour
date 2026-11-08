@@ -21,6 +21,8 @@ public sealed partial class CompanionEngine
         internal string Speaker { get; } = speaker;
         internal WorkEffort Effort { get; } = effort;
         internal int Limit { get; } = effort == WorkEffort.Deep || request.SearchWeb && request.DesktopInput ? 12 : 5;
+        internal int? RetryEnd { get; set; }
+        internal int BudgetEnd => RetryEnd ?? Limit;
         internal bool Delegated { get; set; } = delegated;
         internal List<ToolResult> Results { get; } = [];
         internal HashSet<string> UsedActions { get; } = new(StringComparer.Ordinal);
@@ -48,7 +50,7 @@ public sealed partial class CompanionEngine
 
     private sealed record WorkDecision(string[]? Plan, ToolRequest? Action, string? Reply);
 
-    private async Task StartWorkAsync(string input, TurnPlan plan, CancellationToken ct)
+    private async Task StartWorkAsync(string input, TurnPlan plan, CancellationToken ct, string? priorOverride = null)
     {
         PrunePendingActions();
         if (pending.Any(p => p.Value.Work is not null))
@@ -58,12 +60,25 @@ public sealed partial class CompanionEngine
         }
 
         var previous = memory.Recent.Where(e => e.Role == "user").SkipLast(1).LastOrDefault();
-        var prior = previous is not null && IsMainSpeaker(previous.SpeakerId)
-            ? IntentRouter.CommandText(previous.Text, config.CharacterName) : "";
+        var prior = priorOverride ?? (previous is not null && IsMainSpeaker(previous.SpeakerId)
+            ? IntentRouter.CommandText(previous.Text, config.CharacterName) : "");
         var request = new WorkRequest(IntentRouter.CommandText(input, config.CharacterName), prior, plan.AllowIncidentalScreen, plan.Work, plan.Revision);
+        var track = !IsIncognito && IsMainSpeaker(currentSpeaker);
+        if (track)
+        {
+            resumableWork = null;
+            await SaveCurrentWorkAsync(new(ClipWorkText(input, 7900), currentSpeaker, WorkflowStatus.Blocked,
+                "Checking the task requirements."), ct);
+        }
+        async Task BlockAsync(string detail)
+        {
+            if (track && memory.Tasks.Current is { } current)
+                await SaveCurrentWorkAsync(current with { Detail = ClipWorkText(detail, 950) }, ct);
+            await DeliverReplyAsync(detail, false, ct);
+        }
         if (request.Drawing?.Limitation is {} limitation)
         {
-            await DeliverReplyAsync(limitation, false, ct);
+            await BlockAsync(limitation);
             return;
         }
         string? notepad = null;
@@ -75,7 +90,7 @@ public sealed partial class CompanionEngine
                 !config.Permissions.AllowedApplications.TryGetValue("notepad", out notepad) ? "The notepad application alias is missing from the configuration." : null;
             if (blocked is not null)
             {
-                await DeliverReplyAsync(blocked, false, ct);
+                await BlockAsync(blocked);
                 return;
             }
         }
@@ -92,7 +107,7 @@ public sealed partial class CompanionEngine
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException or UnauthorizedAccessException)
             {
-                await DeliverReplyAsync(ex.Message, false, ct);
+                await BlockAsync(ex.Message);
                 return;
             }
         }
@@ -103,7 +118,7 @@ public sealed partial class CompanionEngine
             try { editorRevisionText = await ReadEditorArtifactAsync(editorArtifact,ct); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
             {
-                await DeliverReplyAsync(ex.Message,false,ct);
+                await BlockAsync(ex.Message);
                 return;
             }
         }
@@ -120,6 +135,7 @@ public sealed partial class CompanionEngine
         var namedApplications = config.Permissions.AllowedApplications
             .Where(app => MentionsApplication(request.Goal + " " + request.PriorSubject, app.Key)).ToArray();
         run.ExpectedApplication = notepad ?? (namedApplications.Length == 1 ? namedApplications[0].Value : null);
+        if (track) resumableWork = run;
         ui.Write($"[Work · {run.Effort.ToString().ToLowerInvariant()}] Preparing a plan.");
         await RunWorkAsync(run, ct);
     }
@@ -136,6 +152,7 @@ public sealed partial class CompanionEngine
 
         try
         {
+            await UpdateCurrentWorkAsync(run, WorkflowStatus.Running, "Working on the requested task.", attempt.Token);
             if (approved is null && run.Request.Drawing is null &&
                 run.Effort == WorkEffort.Deep && DeepAnalyst is { } specialist)
             {
@@ -165,7 +182,7 @@ public sealed partial class CompanionEngine
 
                 if (decision.Action is not {} action)
                 {
-                    if (run.Request.WriteInNotepad && run.NotepadTextSent is null && run.Steps < run.Limit &&
+                    if (run.Request.WriteInNotepad && run.NotepadTextSent is null && run.Steps < run.BudgetEnd &&
                         run.Results.Any(result => result.Success) && run.CompletionRetries < 2)
                     {
                         run.CompletionRetries++;
@@ -192,9 +209,9 @@ public sealed partial class CompanionEngine
                 if (IsWorkInput(action.Tool) && run.Frame is null && run.Request.DesktopInput &&
                     run.Request.ObserveWindow && WorkDesktopEnabled && config.Permissions.ScreenCapture)
                     action = IntentRouter.New("observe_window", new { });
-                if (run.Steps == run.Limit)
+                if (run.Steps >= run.BudgetEnd)
                 {
-                    await FinishWorkAsync(run, $"I reached the {run.Limit}-step limit. The log above shows what I completed.", attempt.Token);
+                    await FinishWorkAsync(run, $"I reached this attempt's step limit. The log above shows what I completed.", attempt.Token, incomplete: true);
                     return;
                 }
 
@@ -203,14 +220,16 @@ public sealed partial class CompanionEngine
                 if (error is not null)
                 {
                     RecordWorkResult(run, new(action.Tool, false, error));
+                    if (action.Tool == "observe_window")
+                    {
+                        await FinishWorkAsync(run, error, attempt.Token);
+                        return;
+                    }
                     continue;
                 }
 
                 // A read can verify a new revision. Replaying an identical mutation can duplicate its effects.
-                var repeatKey = JsonSerializer.Serialize(action, AppConfig.Json);
-                if (IsWorkInput(action.Tool)) repeatKey += "@" + Convert.ToHexString(SHA256.HashData(run.Frame!.Image));
-                else if (!IsWorkMutation(action.Tool)) repeatKey += "@" + run.Revision;
-                if (action.Tool != "observe_window" && !run.UsedActions.Add(repeatKey))
+                if (action.Tool != "observe_window" && run.UsedActions.Contains(WorkActionKey(run, action)))
                 {
                     RecordWorkResult(run, new(action.Tool, false, "This exact step already ran. Use its result or choose a different step."));
                     continue;
@@ -223,6 +242,7 @@ public sealed partial class CompanionEngine
                         var id = await QueueApprovalAsync(action, false, attempt.Token, run);
                         if (id > 0)
                         {
+                            await UpdateCurrentWorkAsync(run, WorkflowStatus.Approval, $"Waiting for /approve {id} or /reject {id}.", attempt.Token);
                             if (currentThought is {} note) note.Outcome = "awaiting_approval";
                             return;
                         }
@@ -233,16 +253,22 @@ public sealed partial class CompanionEngine
                     continue;
                 }
                 await PerformWorkActionAsync(run, action, attempt.Token);
+                if (action.Tool == "observe_window" && run.Results.LastOrDefault() is { Success: false } failure)
+                {
+                    await FinishWorkAsync(run, failure.Text, attempt.Token);
+                    return;
+                }
             }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             if (currentThought is {} note) note.Outcome = "interrupted";
+            await UpdateCurrentWorkAsync(run, WorkflowStatus.Blocked, "The attempt was interrupted. Use /task retry to continue.", ct);
             ui.Write("[Work] Stopped. The completed steps are listed above.");
         }
         catch (Exception ex) when (ex is JsonException or InvalidDataException or HttpRequestException)
         {
-            await FinishWorkAsync(run, "I couldn't get a usable next step from the local model. Check the completed steps above.", ct);
+            await FinishWorkAsync(run, "I couldn't get a usable next step from the local model. Check the completed steps above.", ct, incomplete: true);
         }
         finally { lock (speechGate) activityCancellation = null; }
     }
@@ -328,7 +354,7 @@ public sealed partial class CompanionEngine
         var links = WorkLinks(run).Select((link, i) => $"{i + 1}. {link.Label}").ToArray();
         var articles = run.Results.Select((result, i) => (result.Article, Step: i + 1))
             .Where(item => item.Article is not null).Select(item => $"{item.Step}. {item.Article!.Title}").ToArray();
-        messages.Add(new("user", $"Choose the next step. {run.Limit - run.Steps} action slots remain." +
+        messages.Add(new("user", $"Choose the next step. {run.BudgetEnd - run.Steps} action slots remain." +
             (run.Plan.Length == 0 ? "" : "\nYour plan: " + string.Join(" / ", run.Plan)) +
             (run.Results.Count == 0 ? "" : "\nSuccessful actions so far: " + string.Join(", ", run.Results.Where(result => result.Success).Select(result => result.Tool).Distinct())) +
             (run.CompletionRetries == 0 ? "" : "\nThe previous reply ended the workflow too soon. No requested text has been entered yet. If the current source is a catalog, open an actual text from its links. If you have the text, observe the editor and enter it. Choose the next available tool, without repeating completed launches.") +
@@ -590,6 +616,7 @@ public sealed partial class CompanionEngine
         ct.ThrowIfCancellationRequested();
         run.LastAttempt = action;
         ToolResult result;
+        string? repeatKey = null;
         try
         {
             var error = WorkActionError(run, action);
@@ -597,6 +624,14 @@ public sealed partial class CompanionEngine
             {
                 RecordWorkResult(run, new(action.Tool, false, error));
                 return;
+            }
+            if (IsWorkMutation(action.Tool) && ReferenceEquals(run, resumableWork) &&
+                memory.Tasks.Current is { MayHaveChangedComputer: false } current)
+                await SaveCurrentWorkAsync(current with { MayHaveChangedComputer = true }, ct);
+            if (action.Tool != "observe_window")
+            {
+                repeatKey = WorkActionKey(run, action);
+                run.UsedActions.Add(repeatKey);
             }
             var args = action.Args ?? [];
             switch (action.Tool)
@@ -729,7 +764,15 @@ public sealed partial class CompanionEngine
             if (IsWorkInput(action.Tool) || action.Tool is "observe_window" or "focus_app") run.Frame = null;
             result = new(action.Tool, false, ex.Message);
         }
+        if (!result.Success && repeatKey is not null && !IsWorkMutation(action.Tool)) run.UsedActions.Remove(repeatKey);
         RecordWorkResult(run, result);
+    }
+
+    private static string WorkActionKey(WorkRun run, ToolRequest action)
+    {
+        var key = JsonSerializer.Serialize(action, AppConfig.Json);
+        if (IsWorkInput(action.Tool)) return key + "@" + Convert.ToHexString(SHA256.HashData(run.Frame!.Image));
+        return IsWorkMutation(action.Tool) ? key : key + "@" + run.Revision;
     }
 
     private string ObserveWorkWindow(WorkRun run)
@@ -795,8 +838,14 @@ public sealed partial class CompanionEngine
                 ? "\n" + ClipWorkText(result.Text, 400) : ""));
     }
 
-    private async Task FinishWorkAsync(WorkRun run, string reply, CancellationToken ct)
+    private async Task FinishWorkAsync(WorkRun run, string reply, CancellationToken ct, bool incomplete = false)
     {
+        incomplete |= run.Results.LastOrDefault() is not { Success: true } ||
+            (run.Request.WriteInNotepad && run.NotepadTextSent is null) ||
+            (run.Results.LastOrDefault() is { } lastResult && IsWorkInput(lastResult.Tool) && run.Frame is null) ||
+            ((run.Request.WriteFiles || run.Request.DesktopInput || run.Request.OpenApps) &&
+                !run.Results.Any(r => r.Success && IsWorkMutation(r.Tool))) ||
+            Regex.IsMatch(reply, @"\b(?:couldn't|could not|unable|still need|stopped before)\b", RegexOptions.IgnoreCase);
         if (run.Results.LastOrDefault() is { Success: false } failed)
             reply = run.Sketch is {} sketch
                 ? $"Saved and verified “{sketch.Title}” at {sketch.Path}. {ClipWorkText(failed.Text, 420)}"
@@ -816,6 +865,7 @@ public sealed partial class CompanionEngine
         var citations = run.Results.Where(r => r.Success).SelectMany(r => r.Sources ?? []).DistinctBy(s => s.Url).ToArray();
         if (citations.Length > 0) reply = SourceHistory.AddVerifiedLinks(reply, citations);
         if (run.Sketch?.Description is {} description) reply += " " + description;
+        await UpdateCurrentWorkAsync(run, incomplete ? WorkflowStatus.Blocked : WorkflowStatus.Finished, reply, ct);
         await DeliverReplyAsync(reply, false, ct);
         if (run.Results.LastOrDefault() is { Success: false } failure && run.LastAttempt is { } lastAttempt &&
             failure.Tool == lastAttempt.Tool && WorkRequest.PermitsWebLookup(run.Request.Goal))

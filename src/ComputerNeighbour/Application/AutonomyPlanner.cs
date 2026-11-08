@@ -7,14 +7,16 @@ internal enum PersonalAction
 {
     Sleep, Search, ReadArticle, AskGoogle, ReadFile, ReadDiary, Reflect, Write, Sketch, Exercise, Retry, Train,
     Plan, Outline, Opening, TurningPoint, Ending, DrawDraft, Review, Revise, SaveNote, SaveExercise,
-    LoadStory, ContinueStory, ReserveTitle, TitleEntry, RenameEntry, PlanContinuation
+    LoadStory, ContinueStory, ReserveTitle, TitleEntry, RenameEntry, PlanContinuation,
+    InspectImage, ReflectOnWeb, SaveDraft, ReviseStory
 }
 
 [Flags]
 internal enum PersonalFact
 {
     None = 0, FoundSource = 1, ReadMaterial = 2, Reflected = 4, Created = 8, Practiced = 16, Rested = 32, Trained = 64,
-    Planned = 128, Opening = 256, Middle = 512, Drafted = 1024, Reviewed = 2048, Accepted = 4096, Reserved = 8192
+    Planned = 128, Opening = 256, Middle = 512, Drafted = 1024, Reviewed = 2048, Accepted = 4096, Reserved = 8192,
+    ImagesConsidered = 16384, DraftPending = 32768
 }
 
 internal static class AutonomyPlanner
@@ -41,11 +43,11 @@ internal static class AutonomyPlanner
         new(PersonalFact.Planned, PersonalFact.Trained, .08), // Train
         new(0, PersonalFact.Planned, .02),
         new(0, PersonalFact.Planned, .03), // Outline
-        new(PersonalFact.Planned, PersonalFact.Opening, .04),
-        new(PersonalFact.Opening, PersonalFact.Middle, .04),
-        new(PersonalFact.Middle, PersonalFact.Drafted, .04),
+        new(PersonalFact.Planned, PersonalFact.Opening | PersonalFact.DraftPending, .04, Forbids: PersonalFact.Opening | PersonalFact.DraftPending),
+        new(PersonalFact.Opening, PersonalFact.Middle | PersonalFact.DraftPending, .04, Forbids: PersonalFact.Middle | PersonalFact.DraftPending),
+        new(PersonalFact.Middle, PersonalFact.Drafted | PersonalFact.DraftPending, .04, Forbids: PersonalFact.Drafted | PersonalFact.DraftPending),
         new(PersonalFact.Planned, PersonalFact.Drafted, .07), // DrawDraft
-        new(PersonalFact.Drafted, PersonalFact.Reviewed | PersonalFact.Accepted, .025, Forbids: PersonalFact.Reviewed),
+        new(PersonalFact.Drafted, PersonalFact.Reviewed | PersonalFact.Accepted, .025, Forbids: PersonalFact.Reviewed | PersonalFact.DraftPending),
         new(PersonalFact.Reviewed, 0, .045, Clears: PersonalFact.Reviewed, Forbids: PersonalFact.Accepted),
         new(PersonalFact.Accepted, PersonalFact.Reflected, .01),
         new(PersonalFact.Accepted, PersonalFact.Practiced, .01),
@@ -54,16 +56,20 @@ internal static class AutonomyPlanner
         new(PersonalFact.Accepted, PersonalFact.Reserved, .01), // ReserveTitle
         new(0, PersonalFact.Reserved, .025), // TitleEntry
         new(PersonalFact.Reserved, PersonalFact.Created, .01), // RenameEntry
-        new(PersonalFact.ReadMaterial, PersonalFact.Planned, .02) // PlanContinuation
+        new(PersonalFact.ReadMaterial, PersonalFact.Planned, .02), // PlanContinuation
+        new(PersonalFact.ReadMaterial, PersonalFact.ImagesConsidered, .025),
+        new(PersonalFact.Planned | PersonalFact.ReadMaterial | PersonalFact.ImagesConsidered, PersonalFact.Drafted, .03),
+        new(PersonalFact.DraftPending, 0, .005, Clears: PersonalFact.DraftPending),
+        new(PersonalFact.Reviewed, PersonalFact.DraftPending, .045, Clears: PersonalFact.Reviewed, Forbids: PersonalFact.Accepted)
     ];
     private static readonly Dictionary<PersonalGoal, Recipe> Recipes = new()
     {
         [PersonalGoal.Rest] = new(PersonalFact.Rested, [PersonalAction.Sleep]),
-        [PersonalGoal.Explore] = NoteRecipe(PersonalAction.Search, PersonalAction.ReadArticle),
-        [PersonalGoal.Company] = NoteRecipe(PersonalAction.AskGoogle, PersonalAction.Search, PersonalAction.ReadArticle),
+        [PersonalGoal.Explore] = WebRecipe(PersonalAction.Search, PersonalAction.ReadArticle),
+        [PersonalGoal.Company] = WebRecipe(PersonalAction.AskGoogle, PersonalAction.Search, PersonalAction.ReadArticle),
         [PersonalGoal.Read] = NoteRecipe(PersonalAction.ReadFile),
         [PersonalGoal.Write] = new(PersonalFact.Created, [PersonalAction.Outline, PersonalAction.Opening, PersonalAction.TurningPoint,
-            PersonalAction.Ending, PersonalAction.Review, PersonalAction.Revise, PersonalAction.ReserveTitle, PersonalAction.Write]),
+            PersonalAction.Ending, PersonalAction.SaveDraft, PersonalAction.Review, PersonalAction.ReviseStory, PersonalAction.ReserveTitle, PersonalAction.Write]),
         [PersonalGoal.Sketch] = new(PersonalFact.Created, [PersonalAction.Plan, PersonalAction.DrawDraft, PersonalAction.Review,
             PersonalAction.Revise, PersonalAction.Sketch]),
         [PersonalGoal.Revisit] = NoteRecipe(PersonalAction.ReadDiary),
@@ -79,6 +85,9 @@ internal static class AutonomyPlanner
 
     private static Recipe NoteRecipe(params PersonalAction[] acquire) => new(PersonalFact.Reflected,
         [PersonalAction.Plan, .. acquire, PersonalAction.Reflect, PersonalAction.Review, PersonalAction.Revise, PersonalAction.SaveNote]);
+    private static Recipe WebRecipe(params PersonalAction[] acquire) => new(PersonalFact.Reflected,
+        [PersonalAction.Plan, .. acquire, PersonalAction.InspectImage, PersonalAction.ReflectOnWeb,
+            PersonalAction.Review, PersonalAction.Revise, PersonalAction.SaveNote]);
 
     internal static bool NeedsSleep(NeedLevels n) => n.Energy <= .27 || n.Fatigue >= .80;
 

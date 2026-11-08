@@ -58,7 +58,8 @@ public sealed class AppConfig
             Needs.RecentInputSeconds is <10 or >300||Needs.SketchIdleSeconds is <60 or >86400||Needs.SketchCooldownMinutes is <5 or >1440)
             throw new InvalidDataException("Invalid needs or sketch intervals.");
         if (Autonomy.StepSeconds is < 5 or > 600 || Autonomy.IdleSeconds is < 30 or > 3600 ||
-            Autonomy.DeferMinutes is < 1 or > 1440 || Autonomy.TrainingIdleMinutes is < 3 or > 120)
+            Autonomy.DeferMinutes is < 1 or > 1440 || Autonomy.TrainingIdleMinutes is < 3 or > 120 ||
+            Autonomy.MonotonyMinutes is < 3 or > 120 || Autonomy.ActivityBreakMinutes is < 15 or > 1440)
             throw new InvalidDataException("Invalid autonomy intervals.");
         if (Observation.ScreenIntervalSeconds < 10 || Audio.MaxRecordingSeconds < 1 || Audio.MaxRecordingSeconds > 300)
             throw new InvalidDataException("Invalid observation / audio interval.");
@@ -164,6 +165,8 @@ public sealed class AutonomyOptions
     public int IdleSeconds { get; set; } = 90;
     public int DeferMinutes { get; set; } = 20;
     public int TrainingIdleMinutes { get; set; } = 5;
+    public int MonotonyMinutes { get; set; } = 12;
+    public int ActivityBreakMinutes { get; set; } = 120;
 }
 public sealed class PermissionOptions
 {

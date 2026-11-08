@@ -89,7 +89,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         {
             var n = needs.Levels;
             return FormattableString.Invariant($"Boredom={n.Boredom:P0}, loneliness={n.Loneliness:P0}, hurt={n.Hurt:P0}, energy={n.Energy:P0}, fatigue={n.Fatigue:P0}, curiosity={n.Curiosity:P0}, inspiration={n.Inspiration:P0}, excitement={n.Excitement:P0}.\n") +
-                FormattableString.Invariant($"Focus={n.Focus:P0}, confidence={n.Confidence:P0}, frustration={n.Frustration:P0}, calm={n.Calm:P0}, novelty={n.Novelty:P0}, reflection={n.Reflection:P0}, persistence={n.Persistence:P0}, playfulness={n.Playfulness:P0}, ambition={n.Ambition:P0}, contentment={n.Contentment:P0}.");
+                FormattableString.Invariant($"Focus={n.Focus:P0}, confidence={n.Confidence:P0}, frustration={n.Frustration:P0}, calm={n.Calm:P0}, novelty={n.Novelty:P0}, reflection={n.Reflection:P0}, persistence={n.Persistence:P0}, playfulness={n.Playfulness:P0}, ambition={n.Ambition:P0}, contentment={n.Contentment:P0}, monotony={n.Monotony:P0}, anger={n.Anger:P0}.");
         }
     }
     public void InterruptSpeech() { lock(speechGate) speechCancellation?.Cancel(); }
@@ -117,13 +117,24 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             personalLifeUnavailable = false;
         }
         pendingTaskChoice=null;
+        resumableWork=null;
+        pending.Clear();
         lastTurnWasWorkTask=false;
         lastScreenObservation=null;
         screenSubjectTurn=null;
         lastResearch=null;
         LastDialogueExample=null;
     }
-    public Task<string> GetThoughtsAsync(CancellationToken ct)=>thoughtJournal.FormatAsync(ct);
+    public async Task<string> GetThoughtsAsync(CancellationToken ct)
+    {
+        var turns = await thoughtJournal.FormatAsync(ct);
+        if (IsIncognito || !config.TurnProcessing.KeepThoughtJournal) return turns;
+        await InitializePersonalLifeAsync(ct);
+        var entries = life.State.Reflections.TakeLast(10).Select(note =>
+            $"{note.At.ToLocalTime():MM-dd HH:mm} · {note.Topic} · {note.Stage}\n{note.Note}" +
+            (note.Reference.Length > 0 ? "\n" + note.Reference : ""));
+        return life.State.Reflections.Length == 0 ? turns : "Private project notes\n\n" + string.Join("\n\n", entries) + "\n\n" + turns;
+    }
     private async Task InitializeProfileAsync(CancellationToken ct)
     {
         if(profileReady)return;
@@ -145,7 +156,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             lastNeedsSave=now;
         }
         if(!running||quiet||Volatile.Read(ref listening)!=0||personal&&(IsResting||AutonomyPlanner.NeedsSleep(needs.Levels)))return false;
-        var invite=canSpeak&&UnansweredMessages<config.Proactive.MaxUnansweredMessages&&needs.WantsCompany(idle);
+        var invite=canSpeak&&UnansweredMessages<config.Proactive.MaxUnansweredMessages&&needs.WantsCompany(idle,personal);
         if(!invite&&(personal||!needs.WantsToSketch(now,idle)||!SketchActivity.CanSave(paths,config.Permissions)||!canStartSketch()))return false;
 
         using var attempt=CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -306,6 +317,12 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             if(mainSpeaker)needs.NoteConversation(LastInteraction);
             if(ownerTurn&&!forceWork&&!forceScreen&&profile.InitiativeRequestedAt(LastInteraction) is { } reduced)
                 await UpdatePersonalPaceAsync(reduced,LastInteraction,ct);
+            if(ownerTurn&&!forceScreen&&IsCurrentWorkTurn(input))
+            {
+                await memory.AppendAsync("user",input,speaker,ct);
+                await TryCurrentWorkAsync(input,ct);
+                return;
+            }
             if(!forceWork&&!forceScreen&&speaker!="system-event"&&await TryWorkTaskAsync(input,mainSpeaker,ct))return;
             if(mainSpeaker)lastTurnWasWorkTask=false;
             await memory.AppendAsync("user",input,speaker,ct);
@@ -822,6 +839,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     {
         if(!config.Needs.Enabled)return "";
         var state=needs.Levels;
+        if(AutonomyEnabled&&state.Anger>=.35)return "You're upset because one of your own saved pieces went missing. You don't know who moved or removed it. Be frank if it comes up and don't blame your companion.";
         if(state.Hurt>=.12)return "You feel a little left out after a quiet invitation while the computer showed activity. You do not know who was there or why they did not reply. This can show as reserve and ease as conversation resumes. Do not accuse, guilt, or ask repeatedly.";
         if(AutonomyEnabled&&IsResting)return "You were taking a quiet break and can answer now. You feel a little tired.";
         if(state.Loneliness>=.5)return "You could use company. The application handles unsolicited invitations separately. Give the person room.";

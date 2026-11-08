@@ -79,6 +79,7 @@ public static class Program
             await using var regularEngine=new CompanionEngine(paths,config,model,memory,emotions,desktop,audio,ui,weather);
             await regularEngine.GetRelationshipAsync(shutdown.Token);
             await regularEngine.InitializePersonalLifeAsync(shutdown.Token);
+            await regularEngine.RestoreCurrentWorkAsync(shutdown.Token);
             await using var sessions=new CompanionSession(regularEngine,ui);
             var keyName=config.Audio.PushToTalkVirtualKey is >=0x70 and <=0x87?$"F{config.Audio.PushToTalkVirtualKey-0x6F}":$"VK 0x{config.Audio.PushToTalkVirtualKey:X2}";
             ui.Write($"Ready. Type English or Russian. Hold {keyName} to talk. Replies are English.\nMicrophone={config.Permissions.Microphone}; screen={config.Permissions.ScreenCapture}; computer input={config.Permissions.DesktopInput}.");
@@ -137,6 +138,15 @@ public static class Program
                                 case "/lora": await learning.HandleAsync(arg,engine,SignalTrainingDone,shutdown.Token);break;
                                 case "/status": ui.Write(engine.DescribeStatus());break;
                                 case "/life": ui.Write(engine.DescribePersonalLife(DateTimeOffset.Now));break;
+                                case "/web":
+                                    if(arg.Equals("google",StringComparison.OrdinalIgnoreCase))
+                                        await engine.RunBackgroundAsync(async ct =>
+                                        {
+                                            ui.Write(await engine.TestPersonalGoogleAsync(ct));
+                                            return true;
+                                        }, () => queued.HasInput, shutdown.Token);
+                                    else ui.Write(await engine.DescribePersonalWebAsync(DateTimeOffset.Now, shutdown.Token));
+                                    break;
                                 case "/diary": ui.Write(await engine.ReadDiaryAsync(shutdown.Token));break;
                                 case "/pause":
                                     await engine.SetBackgroundPauseAsync(true, shutdown.Token);
@@ -154,7 +164,7 @@ public static class Program
                                     else {audio.EnrollSpeaker(arg);ui.Write("Hold your push-to-talk key and speak alone for several seconds to enroll: "+arg);}
                                     break;
                                 case "/approve": if(int.TryParse(arg,out var approve))await engine.ApproveAsync(approve,shutdown.Token);else ui.Write("Usage: /approve NUMBER");break;
-                                case "/reject": if(int.TryParse(arg,out var reject))engine.Reject(reject);else ui.Write("Usage: /reject NUMBER");break;
+                                case "/reject": if(int.TryParse(arg,out var reject))await engine.RejectFromConsoleAsync(reject,shutdown.Token);else ui.Write("Usage: /reject NUMBER");break;
                                 case "/memory": ui.Write((engine.IsIncognito?"Incognito memory:\n":"Durable memory:\n")+engine.MemorySummary);break;
                                 case "/thoughts": ui.Write(await engine.GetThoughtsAsync(shutdown.Token));break;
                                 case "/relationship": ui.Write(await engine.GetRelationshipAsync(shutdown.Token));break;
@@ -191,7 +201,7 @@ public static class Program
                             if(evt.Kind=="voice")ui.Write($"[{evt.Speaker}; confidence {evt.SpeakerConfidence:F2}] {evt.Text}");
                             await engine.RespondAsync(evt.Text,evt.Speaker,false,false,shutdown.Token);
                             if (!engine.IsIncognito && engine.BackgroundDeferred(DateTimeOffset.Now)) learning.CancelAutomaticTraining();
-                            if (evt.Kind == "text")
+                            if (evt.Kind == "text" && !engine.HasPriorityWork)
                                 await engine.RunBackgroundAsync(async ct =>
                                 {
                                     await learning.MaybeCompareAsync(engine, requested: false, ct);
@@ -204,12 +214,17 @@ public static class Program
                             {
                                 var now=DateTimeOffset.Now;
                                 if(await engine.DeliverWorkTaskReminderAsync(now,activity))return true;
+                                if(engine.HasPriorityWork)return false;
                                 var maySpeak=!engine.BackgroundDeferred(now)&&config.Proactive.Enabled&&engine.CanInitiate;
                                 var idle=maySpeak||engine.AutonomyEnabled?desktop.GetInteractiveIdleTime():null;
+                                var away=idle >= TimeSpan.FromSeconds(config.Proactive.AwayAfterSeconds);
+                                var returned=maySpeak&&idle.HasValue&&config.Proactive.TriggerOnReturnFromIdle&&wasAway&&!away;
+                                if (idle.HasValue) wasAway=away;
+                                if (returned) engine.NoteReturnToComputer();
                                 var quiet=IsQuietHour(now.Hour,config.Proactive.QuietStartHour,config.Proactive.QuietEndHour);
                                 var intervalScale=engine.InitiativeIntervalScale;
                                 var cooldownOver=now-lastOpportunity>TimeSpan.FromSeconds(config.Proactive.CooldownSeconds*intervalScale);
-                                var handled=await engine.TickNeedsAsync(now,idle,quiet,cooldownOver,
+                                var handled=await engine.TickNeedsAsync(now,idle,quiet,cooldownOver&&!engine.HasPersonalNotice(now,idle,quiet),
                                     ()=>desktop.CanUseSketchWorkspace(checkLoad:true,maxSampleSeconds:Math.Max(15,config.Proactive.CheckSeconds*2.0)),
                                     ()=>desktop.GetInteractiveIdleTime()>=TimeSpan.FromSeconds(config.Needs.SketchIdleSeconds)&&desktop.CanUseSketchWorkspace(checkLoad:false),
                                     activity, scheduledPersonalLife:true);
@@ -217,11 +232,10 @@ public static class Program
                                     handled=await engine.TickPersonalLifeAsync(now,idle,quiet,cooldownOver,learning,
                                         SignalTrainingDone,activity,shutdown.Token);
                                 if(handled) {lastOpportunity=DateTimeOffset.Now;return true;}
-                                if(!maySpeak||engine.IsResting||idle is not {} observedIdle)return false;
+                                if(!maySpeak||engine.IsResting||!idle.HasValue)return false;
                                 var window=config.Permissions.ForegroundWindow?desktop.GetForegroundContext():"";
-                                var away=observedIdle.TotalSeconds>=config.Proactive.AwayAfterSeconds;
-                                var trigger=config.Proactive.TriggerOnReturnFromIdle&&wasAway&&!away?"User returned from inactivity.":config.Proactive.TriggerOnWindowChange&&lastWindow!=""&&window!=lastWindow?"The active window changed.":"Scheduled opportunity.";
-                                wasAway=away;lastWindow=window;
+                                var trigger=returned?"User returned from inactivity.":config.Proactive.TriggerOnWindowChange&&lastWindow!=""&&window!=lastWindow?"The active window changed.":"Scheduled opportunity.";
+                                lastWindow=window;
                                 var remarkLimit=config.Proactive.MaxUnansweredMessages;
                                 if(config.Needs.Enabled&&config.Needs.InviteWhenLonely&&remarkLimit>1)remarkLimit--;
                                 if(!engine.WaitingForCompanyReply&&!quiet&&!away&&engine.UnansweredMessages<remarkLimit && cooldownOver && now-engine.LastInteraction>TimeSpan.FromSeconds(config.Proactive.MinIntervalSeconds*intervalScale) && (now>=nextOpportunity||trigger!="Scheduled opportunity."))
@@ -268,7 +282,7 @@ public static class Program
                 }
                 if(string.IsNullOrWhiteSpace(line))continue;
                 queued.AddInput();
-                if(line.Trim().ToLowerInvariant() is not ("/access" or "/status" or "/thoughts" or "/life" or "/diary" or "/help"))
+                if(line.Trim().ToLowerInvariant() is not ("/access" or "/status" or "/thoughts" or "/life" or "/diary" or "/web" or "/task current" or "/help"))
                 {
                     engine.InterruptActivity();
                     engine.InterruptSpeech();
@@ -369,6 +383,8 @@ public static class Program
     /devices       List input/output audio devices
     /status        Mood, personal drives, active goal and memory status
     /life          Show the current personal project, next step, and projects queued for later
+    /web           Show confirmed background searches, articles, pictures and Google results
+    /web google    Try one public question in the dedicated Google AI Mode browser
     /diary         Read recent personal diary entries
     /memory        Show compressed factual memory
     /thoughts      Show recent interpretations, checks and turn outcomes
@@ -383,6 +399,10 @@ public static class Program
     /forget CONFIRM Erase conversation memory and saved tasks
     /approve N     Approve a displayed computer action (expires in 2 minutes)
     /work TASK     Carry out a task in steps and check the results
+    /task current  Show the current task and what actually happened
+    /task retry    Continue the current task from its checkpoint
+    /task compose  Open the reviewed X note draft in the browser
+    /task posted URL  Record the X post after you publish it
     /access        Show the computer access mode
     /full access   Permit automatic actions for explicit tasks in this session
     /ask before edit  Ask before changes and desktop input

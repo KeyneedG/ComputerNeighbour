@@ -63,6 +63,10 @@ public sealed partial class CompanionEngine
                 InterruptActivity();
                 foreach (var id in pending.Where(p => p.Value.Work is not null).Select(p => p.Key).ToArray())
                     pending.Remove(id);
+                if (memory.Tasks.Current is { Pending: true } current && !IsIncognito)
+                    await SaveCurrentWorkAsync(current with { Status = ComputerNeighbour.Memory.WorkflowStatus.Cancelled,
+                        Detail = "You cancelled the task." }, ct);
+                resumableWork = null;
                 delegateNextWork = false;
                 ui.Write("Stopped the current workflow and cleared its pending approval.");
                 return true;

@@ -340,6 +340,58 @@ internal static class EngineTests
             Check.True(f.Output.Lines.Last().Contains("stopped at search_web"), "The reply claimed success despite rejected actions.");
         });
 
+        await suite.Case("the earlier X request is recovered as priority work and retry shows the same actual draft", async root =>
+        {
+            const string request = "Could you enter x.com and post one of yours notes from my account please";
+            const string excerpt = "A small object can carry the whole weight of an untold story.";
+            var paths = new PortablePaths(root);
+            await new PersonalLife(paths).SaveAsync(new() { Journal = [new(DateTimeOffset.UtcNow, PersonalGoal.Explore,
+                "Tiny stories", excerpt + " I want to try this in my next draft.", "https://www.craftliterary.com/flash-fiction/")] }, default);
+            await using (var original = await Fixture.CreateAsync(root, new ScriptedModel()))
+            {
+                foreach (var line in new[] { request, "why you stopped?", "go on and try again", "But you're not doing anything!", "so could do it now?" })
+                    await original.Memory.AppendAsync("user", line, "user");
+            }
+            Uri? opened = null;
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openXComposer: uri => opened = uri);
+            await f.Engine.RestoreCurrentWorkAsync(default);
+            Check.Equal(WorkflowStatus.Draft, f.Memory.Tasks.Current?.Status);
+            Check.True(f.Engine.HasPriorityWork && opened is null, "Startup either lost task priority or opened X without review.");
+            foreach (var line in new[] { "why you stopped?", "go on and try again", "so could do it now?" })
+                await f.Engine.RespondAsync(line, "user", false, false, default);
+            Check.Equal(excerpt, f.Memory.Tasks.Current?.Draft);
+            Check.True(f.Output.Lines.Any(line => line == "[X draft] " + excerpt) && opened is null, "Retry invented or opened a draft.");
+            await f.Engine.RespondAsync("/task compose", "user", false, false, default);
+            Check.Equal("https://x.com/intent/tweet?text=" + Uri.EscapeDataString(excerpt), opened?.AbsoluteUri);
+            Check.Equal(WorkflowStatus.ComposerOpened, f.Memory.Tasks.Current?.Status);
+            Check.True(f.Engine.HasPriorityWork, "Opening a composer was treated as publishing.");
+            await f.Engine.RespondAsync("/task posted https://x.com/example/status/123", "user", false, false, default);
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
+            Check.True(!f.Engine.HasPriorityWork, "Completed work still blocked personal projects.");
+        });
+
+        await suite.Case("a missing foreground window stops once and the same task resumes on a follow-up", async root =>
+        {
+            var frame = new WorkFrame(new(10, 10, 11, "Notepad", "Draft", 0, 0, 1000, 600), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame, frame);
+            var model = new WorkflowModel([], WorkStep("observe_window", new { }), WorkStep("observe_window", new { }),
+                WorkStep("type_text", new { text = "Task draft" }), WorkStep(reply: "I typed the draft."));
+            await using var f = await Fixture.CreateAsync(root, model, workDesktop: desktop);
+            f.Config.Permissions.ScreenCapture = true;
+            f.Config.TurnProcessing.RefineInput = false;
+            await f.Engine.TryHandleAccessCommandAsync("/full access", default);
+            desktop.FailCurrentWindow = true;
+            await f.Engine.RespondAsync("/work Type Task draft in Notepad.", "user", false, false, default);
+            Check.Equal(1, model.Calls.Count);
+            Check.Equal(WorkflowStatus.Blocked, f.Memory.Tasks.Current?.Status);
+            await f.Engine.RespondAsync("why you stopped?", "user", false, false, default);
+            Check.True(f.Output.Lines.Last().Contains("Bring Notepad") || f.Output.Lines.Last().Contains("foreground"), "The status did not report the failed window check.");
+            desktop.FailCurrentWindow = false;
+            await f.Engine.RespondAsync("go on and try again", "user", false, false, default);
+            Check.Equal("Task draft", desktop.Typed.Single());
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
+        });
+
         await suite.Case("guided desktop input observes the effect and stops on a different foreground target", async root =>
         {
             var initial = new WorkFrame(new(10, 10, 11, "Notepad", "Draft", 80, 100, 1000, 600), [1, 2, 3], 500, 300);
@@ -1392,7 +1444,9 @@ internal static class EngineTests
         public List<string> Launched { get; } = [];
         public List<(string Executable, string Path)> OpenedDocuments { get; } = [];
         public int Captures => observation;
-        public WorkWindow CurrentWindow() => frames[observation].Window;
+        public bool FailCurrentWindow { get; set; }
+        public WorkWindow CurrentWindow() => FailCurrentWindow
+            ? throw new InvalidOperationException("Bring the application to the foreground.") : frames[observation].Window;
         public int? Launch(string executable)
         {
             Launched.Add(executable);
@@ -1480,7 +1534,7 @@ internal static class EngineTests
         public required AudioService Audio { get; init; }
         public required WeatherService Weather { get; init; }
         public required CapturingOutput Output { get; init; }
-        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null,IWorkDesktop? workDesktop=null,IWebResearch? web=null)
+        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null,IWorkDesktop? workDesktop=null,IWebResearch? web=null,Action<Uri>? openXComposer=null)
         {
             var paths = new PortablePaths(root);
             var config = new AppConfig();
@@ -1499,7 +1553,7 @@ internal static class EngineTests
             return new Fixture
             {
                 Config = config, Memory = memory, Audio = audio, Weather = weather, Output = output,
-                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,webResearch:web,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch) { Paused = true, WorkDesktopOverride = workDesktop }
+                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,webResearch:web,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch) { Paused = true, WorkDesktopOverride = workDesktop, OpenXComposerOverride = openXComposer }
             };
         }
         public async ValueTask DisposeAsync()

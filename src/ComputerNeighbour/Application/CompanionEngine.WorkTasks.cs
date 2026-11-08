@@ -65,11 +65,12 @@ public sealed partial class CompanionEngine
             case "help":
                 return WorkTaskCommand.Usage;
             case "list":
-                return state.Items.Count == 0 ? "There are no saved tasks yet. Say “remember where we left off with…” to save one."
+                var prefix = state.Current is not null ? DescribeCurrentWork() + "\n\n" : "";
+                return prefix + (state.Items.Count == 0 ? "There are no saved tasks yet. Say “remember where we left off with…” to save one."
                     : "Saved tasks\n" + string.Join("\n", state.Items.Reverse().Select(t =>
                         $"• {t.Title}{(t.Title == state.ActiveTitle ? " (active)" : "")}" +
                         (t.NextStep.Length == 0 ? "" : $" — {t.NextStep}") +
-                        (t.ReminderAt is {} at ? $" (reminder {at.ToLocalTime():yyyy-MM-dd HH:mm})" : "")));
+                        (t.ReminderAt is {} at ? $" (reminder {at.ToLocalTime():yyyy-MM-dd HH:mm})" : ""))));
             case "save":
             case "capture":
                 return await SaveWorkTaskAsync(state, command, ct);

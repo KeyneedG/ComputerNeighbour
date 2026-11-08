@@ -24,20 +24,34 @@ public sealed record SearchResponse(string Query,string Provider,IReadOnlyList<S
 public sealed record WebArticle(string Title,string Url,string Text,bool Truncated,DateTimeOffset? PublishedAt=null)
 {
     internal IReadOnlyList<WebLink> Links { get; init; } = [];
+    internal IReadOnlyList<WebImageLink> Images { get; init; } = [];
     internal bool IsCatalog => Links.Count > 0 && Regex.IsMatch(Title,
         @"\b(?:bibliograph\w*|catalog(?:ue)?|list of (?:works|publications))\b|библиограф|каталог|список (?:произведений|публикаций)|в хронологическом порядке",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 }
 internal sealed record WebLink(string Label,string Url);
+internal sealed record WebImageLink(string Url, string Caption);
+internal interface IWebImageResearch
+{
+    Task<PublicWebImage> ReadImageAsync(string url, CancellationToken ct);
+}
 public interface IWebResearch
 {
     Task<SearchResponse> SearchAsync(string query,bool news,CancellationToken ct);
     Task<WebArticle> ReadAsync(string url,CancellationToken ct);
 }
 
-public sealed class HttpWebResearch(InternetOptions options,Func<string,CancellationToken,Task<PublicDocument>>? fetch=null):IWebResearch
+public sealed class HttpWebResearch(InternetOptions options,Func<string,CancellationToken,Task<PublicDocument>>? fetch=null):IWebResearch, IWebImageResearch
 {
     private readonly Func<string,CancellationToken,Task<PublicDocument>> fetch=fetch??PublicWeb.ReadDocumentAsync;
+    async Task<PublicWebImage> IWebImageResearch.ReadImageAsync(string url, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Min(15, options.RequestTimeoutSeconds)));
+        try { return await PublicWeb.ReadImageAsync(url, timeout.Token); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        { throw new TimeoutException("The public image did not load in time."); }
+    }
     private async Task<PublicDocument> FetchAsync(string url,CancellationToken ct)
     {
         using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -115,8 +129,38 @@ public static class WebParsing
             var property=Attribute(tag.Value,"property")??Attribute(tag.Value,"name");
             if(property is not null&&new[]{"article:published_time","datePublished","pubdate","date"}.Contains(property,StringComparer.OrdinalIgnoreCase)&&DateTimeOffset.TryParse(Attribute(tag.Value,"content"),CultureInfo.InvariantCulture,DateTimeStyles.AssumeUniversal,out var date)){published=date;break;}
         }
+        var origin = new Uri(document.Url);
         return new(title,document.Url,text[..Math.Min(maximum,text.Length)],text.Length>maximum,published)
-            { Links=isHtml?ArticleLinks(content,new Uri(document.Url)):[] };
+            { Links = isHtml ? ArticleLinks(content, origin) : [], Images = isHtml ? ArticleImages(content, html, origin) : [] };
+    }
+
+    private static IReadOnlyList<WebImageLink> ArticleImages(string body, string html, Uri origin)
+    {
+        body = Replace(body, @"<!--[\s\S]*?-->|<(script|style|nav|footer|header)\b[^>]*>[\s\S]*?</\1\s*>", "");
+        var candidates = new List<WebImageLink>();
+        void Add(string? source, string? caption)
+        {
+            if (string.IsNullOrWhiteSpace(source) || !Uri.TryCreate(origin, source.Trim(), out var uri) ||
+                !IsWebUrl(uri.AbsoluteUri) || !uri.IsDefaultPort || uri.AbsoluteUri.Length > 1200 ||
+                Regex.IsMatch(uri.AbsolutePath, @"(?:\.(?:svg|gif|webp|ico)$|/logos?/|favicon|tracking|pixel\.)", RegexOptions.IgnoreCase) ||
+                candidates.Any(item => item.Url == uri.AbsoluteUri)) return;
+            var alt = caption is null ? "" : Text(caption);
+            candidates.Add(new(uri.AbsoluteUri, alt[..Math.Min(200, alt.Length)]));
+        }
+        foreach (Match match in Regex.Matches(body, @"<img\b[^>]*>", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(2)).Take(60))
+        {
+            var alt = Attribute(match.Value, "alt");
+            if (string.IsNullOrWhiteSpace(alt)) continue;
+            Add(Attribute(match.Value, "data-src") ?? Attribute(match.Value, "src"), alt);
+            if (candidates.Count == 3) break;
+        }
+        foreach (Match match in Regex.Matches(html, @"<meta\b[^>]*>", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(2)).Take(80))
+        {
+            if (!string.Equals(Attribute(match.Value, "property"), "og:image", StringComparison.OrdinalIgnoreCase)) continue;
+            Add(Attribute(match.Value, "content"), "Article image");
+            break;
+        }
+        return candidates;
     }
 
     private static IReadOnlyList<WebLink> ArticleLinks(string html,Uri origin)
@@ -139,7 +183,7 @@ public static class WebParsing
     }
     private static string? Attribute(string tag,string name)
     {
-        var match=Regex.Match(tag,"\\b"+Regex.Escape(name)+"\\s*=\\s*(?:\"(?<v>[^\"]*)\"|'(?<v>[^']*)')",RegexOptions.IgnoreCase,TimeSpan.FromSeconds(1));
+        var match=Regex.Match(tag,"(?<![\\w:-])"+Regex.Escape(name)+"\\s*=\\s*(?:\"(?<v>[^\"]*)\"|'(?<v>[^']*)')",RegexOptions.IgnoreCase,TimeSpan.FromSeconds(1));
         return match.Success?WebUtility.HtmlDecode(match.Groups["v"].Value):null;
     }
     public static IReadOnlyList<SearchHit> Rss(string xml)

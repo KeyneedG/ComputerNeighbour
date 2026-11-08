@@ -19,7 +19,7 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
     private const int Name = 30005, HasFocus = 30008, Enabled = 30010, AutomationId = 30011;
     private static readonly string[] AddFiles = ["Add files and tools", "Добавить файлы и инструменты"];
     private static readonly string[] Upload = ["Add images", "Upload images", "Upload image", "Upload files", "Добавить изображения", "Загрузить изображение"];
-    private static readonly string[] Ask = ["Ask anything", "Спросите что угодно", "Задайте вопрос"];
+    private static readonly string[] Ask = ["Ask anything", "Ask a question", "Ask a follow-up", "Спросите что угодно", "Задайте вопрос", "Задайте уточняющий вопрос"];
     private static readonly string[] Submit = ["Send", "Submit", "Send message", "Отправить"];
     private static readonly string[] Stop = ["Stop", "Stop generating", "Stop response", "Остановить"];
     private int busy;
@@ -31,8 +31,9 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         return await RunInBrowserAsync(image, question, status, null, null, ct);
     }
 
-    internal Task<GoogleVisualResult> AskAsync(string question, string profile, Func<bool> desktopIdle, CancellationToken ct) =>
-        RunInBrowserAsync(null, question, _ => { }, profile, desktopIdle, ct);
+    internal Task<GoogleVisualResult> AskAsync(string question, string profile, Func<bool> desktopIdle, CancellationToken ct,
+        Action<string>? status = null) =>
+        RunInBrowserAsync(null, question, status ?? (_ => { }), profile, desktopIdle, ct);
 
     private async Task<GoogleVisualResult> RunInBrowserAsync(byte[]? image, string question, Action<string> status,
         string? profile, Func<bool>? desktopIdle, CancellationToken ct)
@@ -113,10 +114,22 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         else
         {
             VerifyTarget(uia, root, browser, ct);
-            if (inputStamp is null || WindowsDesktop.GoogleInputStamp() != inputStamp || !uia.TryInvoke(send))
-                throw new InvalidOperationException("Google's send control could not be used on the idle desktop.");
+            if (inputStamp is null || WindowsDesktop.GoogleInputStamp() != inputStamp)
+                throw new InvalidOperationException("The desktop became active before Google could receive the question.");
+            if (!uia.TryInvoke(send))
+            {
+                if (uia.GetBoolean(composer, HasFocus) != true ||
+                    !Normalize(uia.GetString(composer, NativeUia.ValueProperty) ?? uia.ReadDocumentText(composer, 1000, ct) ?? "")
+                        .Equals(Normalize(question), StringComparison.Ordinal))
+                    throw new InvalidOperationException("Google's question field changed before submission.");
+                VerifyTarget(uia, root, browser, ct);
+                if (WindowsDesktop.GoogleInputStamp() != inputStamp)
+                    throw new InvalidOperationException("The desktop became active before Google could receive the question.");
+                desktop.PressKey("ENTER");
+                inputStamp = WindowsDesktop.GoogleInputStamp();
+            }
         }
-        status("Image attached. Waiting for Google's reply.");
+        status(file is null ? "Question submitted. Waiting for Google's reply." : "Image attached. Waiting for Google's reply.");
         return WaitForAnswer(uia, root, browser, question, priorLinks, file is not null, inputStamp, ct);
     }
 
@@ -169,7 +182,12 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
             using var document = CurrentDocument(uia, root, browser);
             if (document is null) return null;
             using var stopping = Find(uia, document, [Button], item => MatchName(uia.GetString(item, Name), Stop));
-            var answer = stopping is null ? ExtractAnswer(ReadText(uia, document, ct), question, visual) : null;
+            string? answer = null;
+            if (stopping is null)
+            {
+                answer = ExtractAnswer(uia.ReadDocumentText(document, 16000, ct) ?? "", question, visual);
+                answer ??= ExtractAnswer(uia.ReadAccessibleText(document, 16000, ct, out _), question, visual);
+            }
             if (answer is null || answer != previous)
             {
                 previous = answer;
@@ -195,8 +213,10 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         if (start < 0 && !visual)
             start = Array.FindLastIndex(lines, line => Normalize(line).Equals(normalizedQuestion, StringComparison.Ordinal));
         if (start < 0) return null;
-        var end = Array.FindIndex(lines, start + 1, line => MatchName(line,
-            ["Good response", "Bad response", "Хороший ответ", "Плохой ответ"]));
+        var feedback = visual ? new[] { "Good response", "Bad response", "Хороший ответ", "Плохой ответ" } :
+            ["Good response", "Bad response", "Helpful", "Not helpful", "Share response", "Хороший ответ", "Плохой ответ", "Поделиться ответом"];
+        var end = Array.FindIndex(lines, start + 1, line => MatchName(line, feedback) ||
+            !visual && line.StartsWith("AI Mode can make mistakes", StringComparison.OrdinalIgnoreCase));
         return end > start + 1 ? string.Join("\n", lines[(start + 1)..end]) : null;
     }
 
@@ -218,17 +238,30 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
         return sources;
     }
 
-    private static string ReadText(NativeUia uia, NativeUia.ComPointer document, CancellationToken ct) =>
-        uia.ReadDocumentText(document, 16000, ct) is { Length: > 0 } text ? text :
-            uia.ReadAccessibleText(document, 16000, ct, out _);
-
     private NativeUia.ComPointer WaitForControl(NativeUia uia, NativeUia.ComPointer root, WorkWindow browser,
-        int[] types, string[] names, CancellationToken ct) =>
-        WaitFor(() =>
+        int[] types, string[] names, CancellationToken ct)
+    {
+        try
         {
-            using var document = CurrentDocument(uia, root, browser);
-            return document is null ? null : Find(uia, document, types, element => MatchName(uia.GetString(element, Name), names));
-        }, $"Google AI Mode did not expose the “{names[0]}” control. Check whether AI Mode is available in Chrome.", 12, ct);
+            return WaitFor(() =>
+            {
+                using var document = CurrentDocument(uia, root, browser);
+                return document is null ? null : Find(uia, document, types, element => MatchName(uia.GetString(element, Name), names));
+            }, $"Google AI Mode did not expose the “{names[0]}” control in the dedicated Chrome profile.", 12, ct);
+        }
+        catch (TimeoutException)
+        {
+            var address = NativeUia.WebAddress(uia.ReadAddress(root, ct));
+            if (Uri.TryCreate(address, UriKind.Absolute, out var url))
+            {
+                if (url.Host == "accounts.google.com") throw new InvalidOperationException("Google requested sign-in in the dedicated Chrome profile.");
+                if (url.Host == "consent.google.com") throw new InvalidOperationException("Google opened a consent page in the dedicated Chrome profile.");
+                if (url.Host is "google.com" or "www.google.com" && url.AbsolutePath.StartsWith("/sorry", StringComparison.Ordinal))
+                    throw new InvalidOperationException("Google requested a traffic verification check.");
+            }
+            throw;
+        }
+    }
 
     private NativeUia.ComPointer? CurrentDocument(NativeUia uia, NativeUia.ComPointer root, WorkWindow browser)
     {
