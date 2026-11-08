@@ -13,6 +13,18 @@ public sealed class MemoryOptions
 
 public sealed record MemoryEntry(DateTimeOffset At, string Role, string Text, string SpeakerId = "user");
 
+internal sealed record WorkTask(string Title, string Goal, string Progress, string NextStep,
+    IReadOnlyList<string> References, DateTimeOffset? ReminderAt = null);
+
+internal sealed record WorkTaskState(IReadOnlyList<WorkTask> Items, string? ActiveTitle = null)
+{
+    internal WorkTask? Active => Items.FirstOrDefault(t => t.Title == ActiveTitle);
+
+    internal WorkTaskState WithTask(WorkTask task, bool activate = true) =>
+        new([.. Items.Where(t => !t.Title.Equals(task.Title, StringComparison.OrdinalIgnoreCase)), task],
+            activate ? task.Title : ActiveTitle);
+}
+
 /// <summary>The snapshot is authoritative; the rotating journal is a bounded audit trail. Never persist private model reasoning.</summary>
 public sealed class MemoryStore
 {
@@ -67,6 +79,7 @@ public sealed class MemoryStore
     }
 
     public string Summary => Volatile.Read(ref _state).Summary;
+    internal WorkTaskState Tasks => Volatile.Read(ref _state).Tasks;
     public DateTimeOffset LastCompactedAt => Volatile.Read(ref _state).LastCompactedAt;
     public int StoredCharacters => Volatile.Read(ref _state).Recent.Sum(e => e.Text.Length);
     public string? RecoveryNotice { get; private set; }
@@ -140,6 +153,21 @@ public sealed class MemoryStore
             try { await AppendJournalAsync(entry, CancellationToken.None); JournalWarning = null; }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             { JournalWarning = "Memory was saved, but its optional audit journal could not be updated: " + e.Message; }
+        }
+        finally { _gate.Release(); }
+    }
+
+    internal async Task<bool> SaveTasksAsync(WorkTaskState expected, WorkTaskState tasks, CancellationToken ct)
+    {
+        EnsureInitialized();
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (!ReferenceEquals(_state.Tasks, expected)) return false;
+            var next = _state with { Tasks = tasks };
+            await SaveStateAsync(next, ct);
+            Volatile.Write(ref _state, next);
+            return true;
         }
         finally { _gate.Release(); }
     }
@@ -241,7 +269,10 @@ public sealed class MemoryStore
         var state = await JsonSerializer.DeserializeAsync<MemoryState>(stream, Json, cancellationToken)
             ?? throw new InvalidDataException("The memory snapshot is empty.");
         if (state.Version != 1 || state.Recent is null || state.Summary is null || string.IsNullOrWhiteSpace(state.Generation) ||
-            state.Recent.Any(e => e is null || e.Text is null || e.Role is null || e.SpeakerId is null))
+            state.Recent.Any(e => e is null || e.Text is null || e.Role is null || e.SpeakerId is null) ||
+            state.Tasks?.Items is null || state.Tasks.Items.Any(t => t is null || string.IsNullOrWhiteSpace(t.Title) ||
+                t.Goal is null || t.Progress is null || t.NextStep is null || t.References is null ||
+                t.References.Any(string.IsNullOrWhiteSpace)))
             throw new InvalidDataException("Unsupported or incomplete memory snapshot.");
         return state;
     }
@@ -282,5 +313,6 @@ public sealed class MemoryStore
         public string Summary { get; init; } = "";
         public DateTimeOffset LastCompactedAt { get; init; } = DateTimeOffset.UtcNow;
         public List<MemoryEntry> Recent { get; init; } = [];
+        public WorkTaskState Tasks { get; init; } = new([]);
     }
 }

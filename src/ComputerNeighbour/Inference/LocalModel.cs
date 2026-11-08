@@ -8,11 +8,11 @@ using ComputerNeighbour.Platform;
 namespace ComputerNeighbour.Inference;
 
 public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
-public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch }
+public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask }
 public interface IChatModel
 {
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct);
-    Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch,ct);
+    Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.WorkTask,ct);
 }
 
 public interface ITurnContextModel
@@ -46,6 +46,14 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
           "x":{"type":"integer","minimum":0,"maximum":99},"y":{"type":"integer","minimum":0,"maximum":99},
           "w":{"type":"integer","minimum":1,"maximum":100},"h":{"type":"integer","minimum":1,"maximum":100}
         }}}
+    }}
+    """);
+    private static readonly JsonElement WorkTaskSchema=JsonSerializer.Deserialize<JsonElement>("""
+    {"type":"object","additionalProperties":false,"required":["matches","title","goal","progress","nextStep","references"],"properties":{
+      "matches":{"type":"array","maxItems":8,"items":{"type":"integer","minimum":1}},
+      "title":{"type":"string","maxLength":100},"goal":{"type":"string","maxLength":500},
+      "progress":{"type":"string","maxLength":1000},"nextStep":{"type":"string","maxLength":500},
+      "references":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}}
     }}
     """);
     private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>("""
@@ -110,9 +118,12 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         }
     }
     public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct)=>RequestAsync(messages,json,json?0.25:0.25,false,ct);
-    public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>
-        purpose==GenerationPurpose.Sketch?RequestAsync(messages,true,.65,false,ct,SketchSchema,1350):
-        RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct);
+    public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>purpose switch
+    {
+        GenerationPurpose.Sketch => RequestAsync(messages,true,.65,false,ct,SketchSchema,1350),
+        GenerationPurpose.WorkTask => RequestAsync(messages,true,0,false,ct,WorkTaskSchema,1000),
+        _ => RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct)
+    };
     public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,320);
     public async Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>
         await RequestAsync(messages,true,0,false,ct,SpeechSchemas[sentenceCount-1],140);

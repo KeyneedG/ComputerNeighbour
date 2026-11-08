@@ -20,6 +20,72 @@ internal static class EngineTests
 
     public static async Task RunAsync(Suite suite)
     {
+        await suite.Case("work checkpoints persist, ask which task to resume and deliver a saved reminder once", async root =>
+        {
+            var model = new ScriptedModel("""
+                {"matches":[],"title":"Письмо","goal":"Send the meeting email","progress":"Draft is ready","nextStep":"Confirm the meeting date",
+                 "references":["documents/letter.md","documents/invented.md"]}
+                """);
+            DateTimeOffset due;
+            await using (var f = await Fixture.CreateAsync(root, model))
+            {
+                await f.Memory.AppendAsync("user", "Черновик письма в documents/letter.md готов, осталось уточнить дату встречи.");
+                await f.Memory.AppendAsync("user", "GUEST_SENTINEL: I have a completely separate draft.", "guest");
+                await f.Engine.RespondAsync("Запомни, где я остановился с письмом.", "user", false, false, default);
+                var letter = f.Memory.Tasks.Items.Single();
+                Check.Equal("Письмо", letter.Title);
+                Check.Equal("documents/letter.md", letter.References.Single());
+                Check.True(!model.Calls.Single().Messages.Last().Text.Contains("GUEST_SENTINEL"), "Another speaker's message entered the checkpoint extraction.");
+                await f.Engine.RespondAsync("/task save Поездка | Book transport | Chose the city | Check train prices", "user", false, false, default);
+                await f.Engine.RespondAsync("Продолжим", "user", false, false, default);
+                Check.True(f.Output.Lines.Last().Contains("Which task") && f.Output.Lines.Last().Contains("Поездка"), "An ambiguous request chose a task.");
+                await f.Engine.RespondAsync("Письмо", "user", false, false, default);
+                Check.True(f.Output.Lines.Last().Contains("Confirm the meeting date"), "A task choice did not resume the original request.");
+                await f.Engine.RespondAsync("Напомни завтра продолжить.", "user", false, false, default);
+                due = f.Memory.Tasks.Active!.ReminderAt!.Value;
+                Check.Equal(9, due.ToLocalTime().Hour);
+                await f.Memory.CompactAsync((_, _) => Task.FromResult("Ordinary dialogue summary."));
+                Check.Equal(2, f.Memory.Tasks.Items.Count);
+            }
+
+            await using var restarted = await Fixture.CreateAsync(root, new ScriptedModel());
+            await restarted.Engine.RespondAsync("Что у меня осталось по задаче «Письмо»?", "user", false, false, default);
+            Check.True(restarted.Output.Lines.Last().Contains("Confirm the meeting date"), "A restart lost the saved task.");
+            await restarted.Engine.RespondAsync("/tasks", "guest", false, false, default);
+            Check.True(!restarted.Output.Lines.Last().Contains("Письмо"), "A guest could list the main user's work tasks.");
+            Check.True(!await restarted.Engine.DeliverWorkTaskReminderAsync(due.AddSeconds(-1), default), "The reminder ran before it was due.");
+            Check.True(await restarted.Engine.DeliverWorkTaskReminderAsync(due, default), "The saved reminder did not run.");
+            Check.True(restarted.Output.Lines.Last().Contains("Confirm the meeting date"), "The reminder omitted the task's next step.");
+            Check.True(!await restarted.Engine.DeliverWorkTaskReminderAsync(due.AddMinutes(1), default), "The reminder ran twice.");
+            await restarted.Engine.ForgetConversationAsync(default);
+            Check.Equal(0, restarted.Memory.Tasks.Items.Count);
+        });
+
+        await suite.Case("task search and comparison use attached files and respect read permissions", async root =>
+        {
+            var model = new ScriptedModel("The new draft adds a confirmed Tuesday meeting time.");
+            await using var f = await Fixture.CreateAsync(root, model);
+            Directory.CreateDirectory(Path.Combine(root, "documents"));
+            await File.WriteAllTextAsync(Path.Combine(root, "documents", "older.md"), "Meeting draft\nOLD_VERSION: date still open.");
+            await File.WriteAllTextAsync(Path.Combine(root, "documents", "newer.md"), "Meeting draft\nNEW_VERSION: Tuesday at 10.");
+            Task Turn(string input) => f.Engine.RespondAsync(input, "user", false, false, default);
+            await Turn("/task save Letter | Send the email | Wrote two drafts | Confirm the time");
+            await Turn("Attach documents/older.md to task Letter");
+            await Turn("Привяжи documents/newer.md к задаче Letter");
+            await Turn("Найди Tuesday в файлах задачи Letter");
+            Check.True(f.Output.Lines.Last().Contains("documents/newer.md:2") && f.Output.Lines.Last().Contains("Tuesday at 10."),
+                "Task search did not return the actual matching line.");
+            Check.Equal(0, model.Calls.Count);
+            await Turn("Что поменялось?");
+            var source = model.Calls.Single().Messages.Last().Text;
+            Check.True(source.IndexOf("OLD_VERSION", StringComparison.Ordinal) < source.IndexOf("NEW_VERSION", StringComparison.Ordinal) &&
+                source.Contains("OLD_VERSION") && source.Contains("NEW_VERSION"), "The comparison model did not get both actual versions in order.");
+            f.Config.Permissions.ReadFiles = false;
+            await Turn("Сравни версии задачи Letter");
+            Check.Equal(1, model.Calls.Count);
+            Check.True(f.Output.Lines.Last().Contains("File reading is disabled"), "The comparison bypassed file reading permissions.");
+        });
+
         await suite.Case("loneliness makes one invitation and hurt needs input after the unanswered invitation",async root=>
         {
             var model=new ScriptedModel("Sure, let's pick it up.",Decision(speak:false));
@@ -43,14 +109,41 @@ internal static class EngineTests
             await f.Engine.RespondAsync("I'm back, we can talk now.","user",false,false,default);
             Check.True(!f.Engine.WaitingForCompanyReply&&!f.Engine.NeedsStatus.Contains("hurt=35"),"An actual reply did not clear the invitation and ease the mood.");
         });
+        await suite.Case("a company invitation can pick up a specific unfinished conversation",async root=>
+        {
+            const string topic="I'm still deciding between a blue awning and a yellow one for the bakery sketch.";
+            const string summary="Open topic for the main user: blue or yellow awning for the bakery sketch; choice still pending.";
+            const string invitation="Did you settle on a colour for the bakery awning? I'd happily talk it through.";
+            var model=new ScriptedModel(summary,invitation);
+            await using var f=await Fixture.CreateAsync(root,model);
+            f.Engine.Paused=false;f.Config.Proactive.RequireFirstUserMessage=false;
+            f.Config.Needs.LonelinessMinutes=1;
+            await f.Memory.AppendAsync("user",topic);
+            await f.Engine.CompactAsync(default);
+            Check.True(f.Memory.Recent.Count==0&&model.Calls[0].Messages[0].Text.Contains("once resolved or declined"),
+                "The scenario did not compact the conversation with instructions for retaining only open topics.");
+            var now=DateTimeOffset.Now;
+            Task<bool> Tick(int seconds,bool quiet)=>f.Engine.TickNeedsAsync(now.AddSeconds(seconds),TimeSpan.Zero,quiet,true,()=>false,()=>false,default);
+            await Tick(0,false);await Tick(30,false);await Tick(60,true);
+            Check.Equal(1,model.Calls.Count);
+
+            Check.True(await Tick(90,false),"The contextual invitation was not delivered.");
+            var messages=model.Calls[1].Messages;
+            Check.True(messages[0].Text.Contains("whether it is still open")&&messages[^1].Text.Contains(summary),
+                "The model lacked the compacted topic or instructions for using it.");
+            Check.True(f.Output.Lines.Single().EndsWith(invitation)&&f.Engine.WaitingForCompanyReply,"The generated line did not count as the single company invitation.");
+            await Tick(120,false);
+            Check.Equal(2,model.Calls.Count);
+        });
         await suite.Case("boredom draws an image only in a permitted idle workspace and saves a portable PNG",async root=>
         {
+            const string aside="I got a little sketch done while it was quiet. I called it “Sun above the valley”.";
             var model=new ScriptedModel("""
                 {"title":"Sun above the valley","background":"#112244","shapes":[
                   {"kind":"ellipse","color":"#FFCC66","x":35,"y":10,"w":25,"h":35},
                   {"kind":"triangle","color":"#775599","x":0,"y":25,"w":80,"h":75},
                   {"kind":"rectangle","color":"#226666","x":0,"y":85,"w":100,"h":15}]}
-                """);
+                """,Decision(aside));
             var launchPaths=new List<string>();
             await using var f=await Fixture.CreateAsync(root,model,openSketch:path=>{launchPaths.Add(path);return true;});
             f.Engine.Paused=false;f.Config.Proactive.RequireFirstUserMessage=false;
@@ -73,6 +166,13 @@ internal static class EngineTests
             Check.True(f.Engine.NeedsStatus.Contains("Boredom=12"),"Drawing did not lower boredom.");
             await Tick(210,away,false,true);await Tick(240,away,false,true);
             Check.Equal(1,model.Calls.Count);
+
+            await f.Engine.RespondAsync("User returned from inactivity.","environment",true,false,default);
+            Check.Equal(1,model.Calls.Count);
+            Check.True(f.Output.Lines.Last().EndsWith(aside),"The proactive turn did not share the saved sketch.");
+            await f.Engine.RespondAsync("Scheduled opportunity.","environment",true,false,default);
+            Check.Equal(2,model.Calls.Count);
+            Check.Equal(1,f.Output.Lines.Count(line=>line.EndsWith(aside)),"The sketch aside was lost or repeated.");
         });
         await suite.Case("explicit read requests are grounded in actual article text before the first model call", async root =>
         {

@@ -50,13 +50,26 @@ public static class ReplyQuality
     public static bool IsShortScreenReaction(string reply,IEnumerable<string> recentReplies)
     {
         var text=reply.Trim();
-        if(text.Length is 0 or >260||text.Contains('\n')||text.Contains('\r')||Regex.Matches(text,@"[.!?]+(?=\s|$)").Count>2)return false;
+        if(!IsBriefAside(text,recentReplies))return false;
         if(Regex.IsMatch(text,@"^(?:[-*#]|\d+[.)]\s|(?:visible details|image analysis|observations|scene description|the (?:screen|screenshot|image|picture|photo) (?:shows|displays|depicts)|i (?:can see|see (?:an?|the|your)\b)|it looks like you(?: are|['’]re))\b)",RegexOptions.IgnoreCase))
             return false;
         var normalized=Normalize(text);
         if(Regex.IsMatch(normalized,@"^(?:that s|that is|that looks|this is|this looks|it looks|looks) (?:a |very |really )?(?:nice|interesting|cool|pretty|beautiful|great|neat)(?: (?:photo|picture|image|shot))?$"))return false;
-        return normalized.Length>0&&!IsEmptyOffer(text)&&!DeniesToolAccess(text,true,false,false)
-            &&!recentReplies.Any(previous=>Normalize(previous)==normalized||IsRepeated(previous,text));
+        return !DeniesToolAccess(text,true,false,false);
+    }
+
+    internal static bool IsBriefAside(string reply,IEnumerable<string> recentReplies)
+    {
+        var text=reply.Trim();
+        return text.Length is >0 and <=260&&!text.Contains('\n')&&!text.Contains('\r')
+            &&Regex.Matches(text,@"[.!?]+(?=\s|$)").Count<=2&&Normalize(text).Length>0
+            &&!IsEmptyOffer(text)&&!RepeatsAny(text,recentReplies);
+    }
+
+    internal static bool RepeatsAny(string reply,IEnumerable<string> recentReplies)
+    {
+        var normalized=Normalize(reply);
+        return recentReplies.Any(previous=>Normalize(previous)==normalized||IsRepeated(previous,reply));
     }
 
     public static bool IsNameQuestion(string text)=>Regex.IsMatch(text,@"\bwhat(?:'s| is) my (?:preferred )?name\b|\bwhat (?:did I ask you to call me|I asked you to call me)\b|\bremind me (?:what|how) I asked you to call me\b|как\s+меня\s+зовут|как\s+я\s+просил\p{L}*.*называть",RegexOptions.IgnoreCase);

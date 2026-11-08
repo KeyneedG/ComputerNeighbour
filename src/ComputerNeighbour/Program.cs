@@ -119,7 +119,8 @@ public static class Program
                                 case "/write":case "/create": await engine.RespondAsync("write "+arg,"user",false,false,shutdown.Token);break;
                                 case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
-                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory, saved web sources and turn notes erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
+                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory, saved tasks and their reminders, web sources and turn notes erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory and saved tasks.");break;
+                                case "/task":case "/tasks": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
                                 case "/look": await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -128,6 +129,7 @@ public static class Program
                         else if(evt.Kind=="tick")
                         {
                             var now=DateTimeOffset.Now;
+                            if(await engine.DeliverWorkTaskReminderAsync(now,shutdown.Token))continue;
                             var idle=!engine.Paused&&config.Proactive.Enabled&&engine.CanInitiate?desktop.GetInteractiveIdleTime():null;
                             var quiet=IsQuietHour(now.Hour,config.Proactive.QuietStartHour,config.Proactive.QuietEndHour);
                             var intervalScale=engine.InitiativeIntervalScale;
@@ -224,8 +226,10 @@ public static class Program
     /thoughts      Show recent interpretations, checks and turn outcomes
     /relationship  Show the separate persistent attitude toward the main user
     /character     Show developing and established habits and interests
+    /tasks         List saved work tasks and upcoming reminders
+    /task          Show task commands for saving, resuming, and linking materials
     /compact       Compact memory now with the model
-    /forget CONFIRM Erase conversation memory
+    /forget CONFIRM Erase conversation memory and saved tasks
     /approve N     Approve a displayed computer action (expires in 2 minutes)
     /reject N      Reject an action
     Edit config/appsettings.json or characters/neighbour.md; restart to reload config.
