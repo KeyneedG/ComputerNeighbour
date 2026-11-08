@@ -29,6 +29,7 @@ internal static class TestRunner
         await BrowserTests.RunAsync(suite);
         await UserProfileTests.RunAsync(suite);
         await ConversationQualityTests.RunAsync(suite);
+        await SpeechTests.RunAsync(suite);
         await InternetTests.RunAsync(suite);
         Console.WriteLine($"\n{suite.Passed} passed, {suite.Failed} failed. Tests require neither model files nor microphone/desktop actions nor network access.");
         if (suite.Failed != 0)

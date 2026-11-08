@@ -100,8 +100,8 @@ public static class Program
                                 case "/exit":case "/quit": shutdown.Cancel();break;
                                 case "/help": ui.Write(Help);break;
                                 case "/status": ui.Write($"Root: {paths.Root}\n{emotions.Status}\n{engine.NeedsStatus}\nMemory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={engine.Paused}; mute={engine.Muted}.");break;
-                                case "/pause": engine.Paused=true;engine.InterruptSpeech();ui.Write("Observation and proactive comments paused. Text chat and held-key microphone remain available.");break;
-                                case "/resume": engine.Paused=false;ui.Write("Observation and proactive comments resumed.");break;
+                                case "/pause": engine.Paused=true;engine.InterruptSpeech();ui.Write("Background observation and proactive comments paused. You can still ask me to look.");break;
+                                case "/resume": engine.Paused=false;ui.Write("Background observation and proactive comments resumed.");break;
                                 case "/mute": engine.Muted=!engine.Muted;engine.InterruptSpeech();ui.Write("Voice muted: "+engine.Muted);break;
                                 case "/devices": ui.Write(audio.DescribeDevices());break;
                                 case "/enroll": audio.EnrollSpeaker(arg);ui.Write("Hold your push-to-talk key and speak alone for several seconds to enroll: "+arg);break;
@@ -120,7 +120,7 @@ public static class Program
                                 case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
                                 case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory, saved web sources and turn notes erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory.");break;
-                                case "/look": if(!config.Permissions.ScreenCapture)ui.Write("Screen capture is disabled in config/appsettings.json.");else if(engine.Paused)ui.Write("Observation is paused; use /resume first.");else await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
+                                case "/look": await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
                         }
@@ -197,6 +197,10 @@ public static class Program
     {
         ui.Write("Portable root: "+paths.Root);
         foreach(var path in new[]{config.Model.Executable,config.Model.ModelFile,config.Model.ProjectorFile,config.Audio.WhisperExecutable,config.Audio.WhisperModel,config.Audio.PiperExecutable,config.Audio.PiperModel,config.Audio.PiperModel+".json",config.CharacterFile})ui.Write($"{(File.Exists(paths.Inside(path))?"OK":"MISSING")} {path}");
+        ui.Write(config.Audio.UsesExpressiveVoice?$"Voice: Qwen3-TTS / {config.Audio.QwenTtsVoice} ({config.Audio.QwenTtsDevice})":"Voice: Piper");
+        if(config.Audio.UsesExpressiveVoice)
+            foreach(var path in new[]{config.Audio.QwenTtsExecutable,config.Audio.QwenTtsModel})
+                ui.Write($"{(File.Exists(paths.Inside(path))?"OK":"MISSING")} {path}");
         ui.Write(audio.DescribeDevices());
     }
     private sealed record AppEvent(string Kind,string Text,string Speaker);
@@ -211,7 +215,7 @@ public static class Program
     /sources       Show verified links from the last lookup
     /write PATH | TEXT  Prepare a new text file
     /edit PATH | OLD | NEW  Prepare an exact replacement in a text file
-    /pause /resume Pause/resume observation and unsolicited comments
+    /pause /resume Pause/resume background observation and unsolicited comments
     /mute          Toggle spoken replies
     /enroll NAME   Enroll the next held-key recording as a speaker (speak alone)
     /devices       List input/output audio devices

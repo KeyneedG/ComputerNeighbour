@@ -220,6 +220,28 @@ internal static class EngineTests
             Check.True(model.Calls.Count==2&&model.Calls.All(call=>call.Messages.Any(m=>m.Image is [1,2,3])),"The actual screenshot did not reach both visual attempts.");
             Check.True(f.Output.Lines.Last().EndsWith(observation)&&f.Output.Lines.All(line=>!line.Contains(denial)),"An unsupported upload disclaimer replaced the real observation.");
         });
+        await suite.Case("сама посмотри captures the screen with the prior topic and rejects an invented privacy refusal",async root=>
+        {
+            const string prompt="Does the new Anima preview look sharper?";
+            const string denial="I cannot browse your screen directly due to privacy and safety constraints.";
+            const string observation="The eyes look crisp in the ComfyUI preview, but the cheek shadows are still quite dark.";
+            var model=new ScriptedModel(denial,observation);
+            var captures=0;
+            await using var f=await Fixture.CreateAsync(root,model,capture:()=>{captures++;return [1,2,3];});
+            f.Config.Permissions.ScreenCapture=true;
+            await f.Memory.AppendAsync("assistant",prompt,"Evelyn");
+            await f.Memory.AppendAsync("assistant",denial,"Evelyn");
+            await f.Engine.RespondAsync("сама посмотри","user",false,false,default);
+            Check.Equal(1,captures);
+            Check.Equal(2,model.Calls.Count);
+            foreach(var call in model.Calls)
+            {
+                Check.True(call.Messages.Last().Image is [1,2,3],"The current request lost its screenshot.");
+                Check.True(call.Messages.Any(m=>m.IsHistory&&m.Text==prompt),"The visual request lost the question it referred to.");
+                Check.True(call.Messages.All(m=>m.Text!=denial),"A false refusal was carried over from conversation history.");
+            }
+            Check.True(f.Output.Lines.Last().EndsWith(observation)&&f.Output.Lines.All(line=>!line.Contains(denial)),"The false privacy refusal reached the user.");
+        });
         await suite.Case("a question about physical activity and a statement about work stay in chat",async root=>
         {
             var model=new ScriptedModel("I don't have a view of your room.",Decision(speak:false),"I hope the project is coming along.",Decision(speak:false),
@@ -235,17 +257,15 @@ internal static class EngineTests
             Check.Equal(6,model.Calls.Count);
             Check.True(model.Calls.All(call=>call.Messages.All(m=>m.Image is null))&&f.Output.Lines.Count==3,"A turn without an authorized screen request tried to take a screenshot.");
         });
-        await suite.Case("natural screen request handles disabled, paused and failed capture without guessing",async root=>
+        await suite.Case("direct screen requests work during a background pause and report real capture failures",async root=>
         {
             var calls=0;
             var model=new ScriptedModel();
             await using var f=await Fixture.CreateAsync(root,model,capture:()=>{calls++;throw new IOException("Test desktop unavailable.");});
             const string request="Можешь сказать чем я сейчас занят? (Подсказка, посмиотри экран)";
             await f.Engine.RespondAsync(request,"user",false,false,default);
-            f.Config.Permissions.ScreenCapture=true;
-            await f.Engine.RespondAsync(request,"user",false,false,default);
             Check.Equal(0,calls);
-            f.Engine.Paused=false;
+            f.Config.Permissions.ScreenCapture=true;
             await f.Engine.RespondAsync(request,"user",false,false,default);
             Check.Equal(1,calls);
             Check.True(f.Output.Lines.Last().Contains("Test desktop unavailable"),"Capture failure was hidden.");

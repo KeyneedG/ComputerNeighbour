@@ -49,6 +49,26 @@
       "executable": "piper.exe"
     },
     {
+      "id": "speech-windows-vulkan-0.10.1",
+      "component": "qwen-tts",
+      "kind": "runtime",
+      "bytes": 29548632,
+      "url": "https://github.com/nyosegawa/speech.cpp/releases/download/v0.10.1/speech-0.10.1-windows-x64-vulkan.zip",
+      "path": "runtimes/downloads/speech-0.10.1-windows-x64-vulkan.zip",
+      "sha256": "a8fe0e4b4f463c460e7ace9d38c363bec08b254cac5a7f764b7967af35d4fa1a",
+      "extractTo": "runtimes/speech",
+      "executable": "speech.exe"
+    },
+    {
+      "id": "qwen3-tts-customvoice-1.7b-q5k",
+      "component": "qwen-tts",
+      "kind": "model",
+      "bytes": 1569079808,
+      "url": "https://huggingface.co/sakasegawa/Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/resolve/a72e6c6575d67652488cdffc1c863215a9899978/Qwen3-TTS-12Hz-1.7B-CustomVoice-Q5_K.gguf",
+      "path": "models/qwen-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice-Q5_K.gguf",
+      "sha256": "c75ace85fa79a897d2b0f6fa05aa9e5ffd6abb869e556f7cf66b35cf87ad12f1"
+    },
+    {
       "id": "qwen35-4b-q4km",
       "component": "llama",
       "kind": "model",

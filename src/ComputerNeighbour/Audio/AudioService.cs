@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using ComputerNeighbour.Configuration;
 using ComputerNeighbour.Platform;
 
 namespace ComputerNeighbour.Audio;
@@ -18,6 +20,12 @@ public sealed class AudioOptions
     public string WhisperModel { get; set; } = "models/whisper/ggml-base.bin";
     public string PiperExecutable { get; set; } = "runtimes/piper/piper.exe";
     public string PiperModel { get; set; } = "models/piper/en_US-lessac-medium.onnx";
+    public string TtsEngine { get; set; } = "piper";
+    public string QwenTtsExecutable { get; set; } = "runtimes/speech/speech.exe";
+    public string QwenTtsModel { get; set; } = "models/qwen-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice-Q5_K.gguf";
+    public string QwenTtsVoice { get; set; } = "ono_anna";
+    public string QwenTtsDevice { get; set; } = "auto";
+    internal bool UsesExpressiveVoice => TtsEngine == "qwen";
     public double SpeechRate { get; set; } = 1;
     public int VoiceSpeakerId { get; set; } = 0;
     public double SpeakerMatchThreshold { get; set; } = 0.12;
@@ -94,37 +102,134 @@ public sealed class AudioService : IAsyncDisposable
         }
     }
 
-    public async Task SpeakAsync(string text, CancellationToken cancellationToken)
+    internal static string PrepareSpeechText(string text)
     {
-        if (!options.Enabled || string.IsNullOrWhiteSpace(text)) return;
         text=Regex.Replace(text,@"\[([^\]]+)\]\([^\)]+\)","$1");
         text=Regex.Replace(text,@"(?m)^\s*#{1,6}\s*","");
         text=text.Replace("**","").Replace("__","").Replace("`","");
+        return text[..Math.Min(12000, text.Length)].Trim();
+    }
+
+    public Task SpeakAsync(string text, CancellationToken cancellationToken) =>
+        !options.Enabled || string.IsNullOrWhiteSpace(text) ? Task.CompletedTask : SpeakPreparedAsync(PrepareSpeechText(text), [], cancellationToken);
+
+    internal async Task SpeakPreparedAsync(string text, IReadOnlyList<SpeechSentence> sentences, CancellationToken cancellationToken,
+        Action<string>? reportVoiceFailure = null)
+    {
+        if (!options.Enabled || string.IsNullOrWhiteSpace(text)) return;
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Audio playback requires Windows.");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopping.Token);
         var token = linked.Token;
         await speechGate.WaitAsync(token);
-        string? wavePath = null;
         try
         {
-            var executable = ResolveInside(options.PiperExecutable); var model = ResolveInside(options.PiperModel);
-            RequireFile(executable, "Piper"); RequireFile(model, "Piper voice"); RequireFile(model + ".json", "Piper voice metadata");
             Directory.CreateDirectory(temporaryDirectory);
-            wavePath = Path.Combine(temporaryDirectory, Guid.NewGuid().ToString("N") + ".wav");
-            var rate = Math.Clamp(options.SpeechRate, 0.5, 2.0);
-            // Piper 2023 CLI. The portable setup pins this release, including its neural English voice.
-            await RunAsync(executable, ["--model", model, "--config", model + ".json", "--output_file", wavePath, "--speaker", Math.Max(0, options.VoiceSpeakerId).ToString(System.Globalization.CultureInfo.InvariantCulture), "--length_scale", (1 / rate).ToString(System.Globalization.CultureInfo.InvariantCulture)], text.Length > 12000 ? text[..12000] : text, token);
-            RequireFile(wavePath, "generated speech");
-            await NativeAudio.PlayAsync(wavePath, options.OutputDeviceId, token);
+            if (!options.UsesExpressiveVoice)
+            {
+                await NativeAudio.PlayAsync(await SynthesizePiperAsync(text, token), options.OutputDeviceId, token);
+                return;
+            }
+
+            var blocks = GroupSpeech(sentences.Count == 0 ? [new(text)] : sentences).ToArray();
+            await PlayExpressiveAsync(blocks, reportVoiceFailure, token);
         }
-        finally { TryDelete(wavePath); speechGate.Release(); }
+        finally { speechGate.Release(); }
+    }
+
+    private async Task PlayExpressiveAsync(SpeechSentence[] blocks, Action<string>? reportVoiceFailure, CancellationToken token)
+    {
+        var played = 0;
+        Exception? failure = null;
+        try
+        {
+            var paths = new PortablePaths(root);
+            var executable = paths.Inside(options.QwenTtsExecutable);
+            var model = paths.Inside(options.QwenTtsModel);
+            RequireFile(executable, "speech.cpp"); RequireFile(model, "Qwen3-TTS voice");
+            var modelBytes = (ulong)new FileInfo(model).Length;
+            // Each CPU lane loads its own weights. Leave room for two models, their working buffers and Windows.
+            var lanes = blocks.Length > 1 && options.QwenTtsDevice == "cpu" && Environment.ProcessorCount >= 8
+                && SystemContext.HasMemoryHeadroom(2 * modelBytes + 1_500_000_000UL) ? 2 : 1;
+            var threads = Math.Clamp(Environment.ProcessorCount / (2 * lanes), 1, 8).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var arguments = new[] { "worker", model, "--device", options.QwenTtsDevice, "--threads", threads,
+                "--voice", options.QwenTtsVoice, "--language", "en", "--no-warmup" };
+
+            failure = await SpeechQueue.PlayAsync(blocks.Length, lanes,
+                () => new QwenVoiceWorker(CreateStartInfo(executable, arguments, redirectInput: true), options.ProcessTimeoutSeconds),
+                async (worker, index, queueToken) =>
+                {
+                    var block = blocks[index];
+                    var spoken = block with { Text = SpeechDelivery.WithSentenceEnding(block.Text) };
+                    var audio = await worker.SynthesizeAsync(spoken, retry: false, queueToken);
+                    if (audio.HasAbruptEnding())
+                    {
+                        audio = await worker.SynthesizeAsync(spoken, retry: true, queueToken);
+                        if (audio.HasAbruptEnding()) audio = await SynthesizePiperAsync(block.Text, queueToken);
+                    }
+                    return audio;
+                }, async (audio, queueToken) =>
+                {
+                    await NativeAudio.PlayAsync(audio, options.OutputDeviceId, queueToken);
+                    played++;
+                }, token);
+        }
+        catch (Exception ex) when (played == 0 && ex is FileNotFoundException)
+        {
+            failure = ex;
+        }
+        if (failure is null) return;
+
+        token.ThrowIfCancellationRequested();
+        if (!IsSynthesisFailure(failure) && failure is not OperationCanceledException)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);
+        reportVoiceFailure?.Invoke(failure is OperationCanceledException ? "Qwen3-TTS timed out. Switching to Piper for this reply." :
+            $"Qwen3-TTS failed. Switching to Piper for this reply. {failure.Message}");
+        var remaining = string.Join(" ", blocks.Skip(played).Select(block => block.Text));
+        await NativeAudio.PlayAsync(await SynthesizePiperAsync(remaining, token), options.OutputDeviceId, token);
+    }
+
+    private static bool IsSynthesisFailure(Exception ex) => ex is IOException or InvalidDataException or System.ComponentModel.Win32Exception
+        or JsonException or KeyNotFoundException or InvalidOperationException or FormatException;
+
+    private async Task<NativeAudio.PcmAudio> SynthesizePiperAsync(string text, CancellationToken token)
+    {
+        var executable = ResolveInside(options.PiperExecutable); var model = ResolveInside(options.PiperModel);
+        RequireFile(executable, "Piper"); RequireFile(model, "Piper voice"); RequireFile(model + ".json", "Piper voice metadata");
+        var rate = Math.Clamp(options.SpeechRate, 0.5, 2.0);
+        var wavePath = Path.Combine(temporaryDirectory, Guid.NewGuid().ToString("N") + ".wav");
+        try
+        {
+            await RunAsync(executable, ["--model", model, "--config", model + ".json", "--output_file", wavePath,
+                "--speaker", Math.Max(0, options.VoiceSpeakerId).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--length_scale", (1 / rate).ToString(System.Globalization.CultureInfo.InvariantCulture)], text, token);
+            return NativeAudio.ReadWave(wavePath);
+        }
+        finally { TryDelete(wavePath); }
+    }
+
+    private static IEnumerable<SpeechSentence> GroupSpeech(IReadOnlyList<SpeechSentence> sentences)
+    {
+        // The first sentence can play as soon as it is ready, even when the rest keeps the same tone.
+        yield return sentences[0];
+        if (sentences.Count < 2) yield break;
+        var block = sentences[1];
+        foreach (var sentence in sentences.Skip(2))
+        {
+            if (sentence.Emotion == block.Emotion && block.Text.Length + sentence.Text.Length < 250)
+            {
+                block = block with { Text = block.Text + " " + sentence.Text };
+                continue;
+            }
+            yield return block;
+            block = sentence;
+        }
+        yield return block;
     }
 
     private async Task RunAsync(string executable, IReadOnlyList<string> arguments, string? input, CancellationToken token)
     {
-        var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = input != null, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        start.Environment["TEMP"] = temporaryDirectory; start.Environment["TMP"] = temporaryDirectory;
+        token.ThrowIfCancellationRequested();
+        var start = CreateStartInfo(executable, arguments, redirectInput: input != null);
         using var process = Process.Start(start) ?? throw new IOException($"Could not start {Path.GetFileName(executable)}.");
         ChildProcessJob.Attach(process);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -146,12 +251,24 @@ public sealed class AudioService : IAsyncDisposable
         catch
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            await process.WaitForExitAsync();
             try { await Task.WhenAll(outputTask, errorTask); } catch (OperationCanceledException) { }
             throw;
         }
     }
 
-    private static async Task<string> DrainBoundedAsync(StreamReader reader, CancellationToken token)
+    private ProcessStartInfo CreateStartInfo(string executable, IReadOnlyList<string> arguments, bool redirectInput)
+    {
+        var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root,
+            RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = redirectInput,
+            StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
+        if (redirectInput) start.StandardInputEncoding = new UTF8Encoding(false);
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        start.Environment["TEMP"] = temporaryDirectory; start.Environment["TMP"] = temporaryDirectory;
+        return start;
+    }
+
+    internal static async Task<string> DrainBoundedAsync(StreamReader reader, CancellationToken token)
     {
         var tail = new StringBuilder(); var buffer = new char[2048];
         int count;

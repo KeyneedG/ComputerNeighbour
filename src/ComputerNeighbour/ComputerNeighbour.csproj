@@ -6,7 +6,10 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>ComputerNeighbour</AssemblyName>
-    <Version>0.7.0</Version>
+    <Version>0.8.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ComputerNeighbour.Tests" />
+  </ItemGroup>
 </Project>

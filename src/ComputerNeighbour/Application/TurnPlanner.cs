@@ -23,6 +23,8 @@ internal static class TurnPlanner
         """^(?:what (?:is|does|do)|define|что (?:такое|значит|означает)|объясни)\s+(?:(?:the (?:word|term)|слово|термин)\s+)?["'«“]?(?<term>[\p{L}][\p{L}\d_-]{1,34}(?: +[\p{L}][\p{L}\d_-]{1,34}){0,2})["'»”]?(?:\s+(?:mean|in (?:internet )?slang|в (?:интернет-)?сленге|на сленге))*[?.!\s]*$""",IgnoreCase);
     private static readonly Regex PhotoRequest=new(
         @"^(?:(?:look at|take a look at|(?<report>describe)|what do you think (?:of|about)|how do you like)\s+(?:this|that|the)\s+(?:photo(?:graph)?|picture|image|shot)|(?:(?:посмотри|взгляни|глянь|(?<report>опиши|проанализируй))\s+(?:на\s+)?|(?:что (?:ты )?думаешь (?:о|об)|как тебе)\s+)(?:эт(?:а|у|о|ой|от|ом)\s+)?(?:фото\p{L}*|сним\p{L}*|кадр\p{L}*|картин\p{L}*|изображени\p{L}*))(?=\s*(?:[?!.,]|$|\b(?:on (?:my|the) screen|in detail|and|на экране|подробно|и)\b))",IgnoreCase);
+    private static readonly Regex DirectLook=new(
+        @"^(?:(?:ну|тогда|then)[,\s]+)?(?:(?:ты\s+)?(?:сама|сам)\s+(?:посмотри|глянь|взгляни|проверь)|(?:посмотри|глянь|взгляни)(?:\s+(?:сама|сам))?|(?:look|take a look)(?:\s+(?:for yourself|yourself))?)[?.!\s]*$",IgnoreCase);
     private static readonly Regex CurrentActivityQuestion=new(
         @"(?:^|[,;:.!?]\s*)(?:(?:and|so|please)[,\s]+)*(?:what\s+am\s+i|(?:tell me\s+(?:(?:can|could)\s+(?:you\s+)?see\s+)?|(?:(?:can|could)\s+(?:you\s+)?)?(?:(?:actually|really)\s+)?see\s+)what\s+(?:am\s+i|i\s+am|i['’]m))\s+(?:currently\s+)?(?:doing|working on)(?=\s*(?:[?.!,]|$|\b(?:currently|right now|now|at the moment|on (?:my|the|this) (?:pc|computer|desktop|screen))\b))",IgnoreCase);
     private static readonly Regex OffScreenActivity=new(
@@ -85,6 +87,7 @@ internal static class TurnPlanner
         }
         if(canObserve&&Regex.IsMatch(request,@"^(?:(?:tell me\s+)?what is (?:on|happening on) (?:my |the )?(?:screen|desktop)|(?:tell me\s+)?what's (?:on my screen|happening on my (?:screen|desktop))|(?:скажи[,\s]+|сказать[,\s]+)?(?:чем я (?:сейчас )?занят\p{L}*|что я (?:сейчас )?делаю|что (?:сейчас )?(?:у меня )?на экране)|(?:look|peek|check)\s+(?:at\s+)?(?:my|the)\s+(?:screen|desktop)|(?:посмиотри|посмотри|взгляни|глянь|проверь)\s+(?:на\s+)?(?:мой\s+)?(?:экран|рабочий стол))\b",IgnoreCase))
             return await RefineKnownAsync(new(TurnIntent.Screen));
+        if(canObserve&&DirectLook.IsMatch(request))return new(TurnIntent.Screen);
         var term=DefinitionTerm(request);
         if(term is not null&&config.Internet.LookupUnfamiliarTerms&&IsSlang(request))return TermSearch(term,true);
         // The classifier can interpret an indirect request using recent turns. It cannot pick filenames,

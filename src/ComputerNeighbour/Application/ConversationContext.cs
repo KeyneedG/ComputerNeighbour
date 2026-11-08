@@ -6,7 +6,7 @@ namespace ComputerNeighbour.Application;
 
 public static class ConversationContext
 {
-    public static List<ChatMessage> Build(string system,IReadOnlyList<MemoryEntry> history,byte[]? image,string currentInput)
+    public static List<ChatMessage> Build(string system,IReadOnlyList<MemoryEntry> history,byte[]? image,string currentInput,bool spokenReply=false)
     {
         var messages=new List<ChatMessage> {new("system",system)};
         var dialogue=history.Where(e=>e.Role is "user" or "assistant").ToList();
@@ -27,6 +27,7 @@ public static class ConversationContext
                 if(!entry.SpeakerId.Equals("user",StringComparison.OrdinalIgnoreCase))text="[Speaker "+entry.SpeakerId+"] "+text;
                 // Make the language instruction local to the latest request as well as the system prompt.
                 if(index==lastUser)text+="\n[Reply in English. Answer the request itself; do not offer to answer later.]";
+                if(index==lastUser&&spokenReply)text+="\n[The app speaks your reply aloud. Write the spoken words only. Copy any script the user explicitly asks to hear verbatim, without an introduction, stage directions, or follow-up.]";
                 messages.Add(new("user",text,index==lastUser?image:null,IsHistory:index!=lastUser));
             }
         }
@@ -77,6 +78,9 @@ public static class ReplyQuality
         return Regex.IsMatch(answer,@"\b(?:your name is|you are|you're)\s+"+Regex.Escape(assistant)+@"\b",RegexOptions.IgnoreCase);
     }
     public static bool DeniesPersistentMemory(string answer)=>Regex.IsMatch(answer,@"\b(?:no|don't have|do not have|cannot retain|can't retain)\s+(?:any\s+)?(?:persistent\s+|long.term\s+)?memor(?:y|ies)\b.{0,70}\b(?:sessions|restarts|conversations)\b",RegexOptions.IgnoreCase);
+    internal static bool ContainsVoiceDirection(string answer)=>Regex.IsMatch(answer,
+        @"(?im)(?:^\s*i (?:can['’]t|cannot|am unable to) (?:read|say|speak)[^.!?\r\n]{0,70}\b(?:out loud|aloud)\b|(?<!\*)\*(?:sings|laughs|sighs|whispers|speaks|smiles|voice +\w+)\b[^*\r\n]{0,100}\*(?!\*))")
+        ||Regex.IsMatch(answer,@"(?im)[.!?""”][ \t]+\((?:[a-z]+ +){0,2}(?:joy|sadness|surprise|anger|fear|warmth|concern)\)[ \t]*\r?$");
     public static bool ClaimsFreshScreenObservation(string answer)
     {
         const string display=@"(?:your|the) (?:screen|desktop)";
@@ -87,8 +91,8 @@ public static class ReplyQuality
 
     public static bool DeniesToolAccess(string answer,bool screen,bool files,bool web)
     {
-        const string denial=@"\bI (?:cannot|can['’]t|could not|couldn['’]t|do not|don['’]t|did not|didn['’]t|am unable to|only)\s+";
-        return screen&&(Regex.IsMatch(answer,denial+@"(?:actually |directly |really )?(?:see|view|access|look at|have access to|receive|take)\s+(?:any |a |the |your |this )?(?:screen\b|desktop\b|screenshot\b|image\b)",RegexOptions.IgnoreCase)
+        const string denial=@"\bI (?:cannot|can['’]t|could not|couldn['’]t|do not|don['’]t|did not|didn['’]t|am unable to|am not allowed to|only)\s+";
+        return screen&&(Regex.IsMatch(answer,denial+@"(?:actually |directly |really )?(?:see|view|browse|capture|access|look at|have access to|receive|take)\s+(?:any |a |the |your |this )?(?:screen\b|desktop\b|screenshot\b|image\b)",RegexOptions.IgnoreCase)
                 ||Regex.IsMatch(answer,denial+@"(?:see|tell|know|determine)\s+what\s+(?:you are|you['’]re)\s+(?:currently\s+)?doing\b.{0,60}\b(?:unless|until|without)\b.{0,80}\bscreenshot\b",RegexOptions.IgnoreCase))
             ||files&&Regex.IsMatch(answer,denial+@"(?:(?:read|open|access|have access to) (?:any |your |local |the )?(?:files|file system)|(?:read|process|see) (?:what|text) you paste)",RegexOptions.IgnoreCase)
             ||web&&Regex.IsMatch(answer,denial+@"(?:actually |directly )?(?:browse|search|access|have access to|use)\s+(?:the )?(?:live )?(?:web|internet|online)",RegexOptions.IgnoreCase);

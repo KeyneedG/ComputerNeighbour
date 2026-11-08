@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -8,6 +9,31 @@ internal static class NativeAudio
 {
     private const uint HeaderDone = 1;
     private static readonly uint HeaderSize = (uint)Marshal.SizeOf<WaveHeader>();
+
+    internal sealed record PcmAudio(byte[] Samples, int SampleRate, ushort Channels)
+    {
+        // A sustained signal at the very last sample can indicate an early codec stop.
+        // Natural fades and quiet final consonants should pass without another generation.
+        internal bool HasAbruptEnding()
+        {
+            var last = SampleRate * Channels * 12 / 1000 * 2;
+            var window = SampleRate * Channels * 80 / 1000 * 2;
+            if (last < 2 || Samples.Length < last + window) return false;
+            var edge = MeanSquare(Samples.AsSpan(Samples.Length - last));
+            return edge > 600 * 600 && edge > MeanSquare(Samples.AsSpan(Samples.Length - last - window, window)) * 0.45;
+        }
+
+        private static double MeanSquare(ReadOnlySpan<byte> pcm)
+        {
+            double sum = 0;
+            for (var i = 0; i < pcm.Length; i += 2)
+            {
+                var sample = BinaryPrimitives.ReadInt16LittleEndian(pcm[i..]);
+                sum += sample * sample;
+            }
+            return sum / (pcm.Length / 2);
+        }
+    }
 
     internal static async Task<byte[]> RecordAsync(int device, int sampleRate, int maxSeconds, Func<bool> held, CancellationToken token)
     {
@@ -84,11 +110,11 @@ internal static class NativeAudio
         writer.Write(Encoding.ASCII.GetBytes("data")); writer.Write(pcm.Length); writer.Write(pcm); return stream.ToArray();
     }
 
-    internal static async Task PlayAsync(string file, int device, CancellationToken token)
+    internal static PcmAudio ReadWave(string file)
     {
         using var reader = new BinaryReader(File.OpenRead(file));
-        if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "RIFF") throw new InvalidDataException("Piper output is not a RIFF wave file.");
-        reader.ReadUInt32(); if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "WAVE") throw new InvalidDataException("Piper output is not a wave file.");
+        if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "RIFF") throw new InvalidDataException("Speech output is not a RIFF wave file.");
+        reader.ReadUInt32(); if (Encoding.ASCII.GetString(reader.ReadBytes(4)) != "WAVE") throw new InvalidDataException("Speech output is not a wave file.");
         WaveFormat format = default; byte[]? data = null;
         while (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
         {
@@ -102,21 +128,38 @@ internal static class NativeAudio
             else if (kind == "data") { if (length > 100_000_000) throw new InvalidDataException("Speech file too large."); data = reader.ReadBytes((int)length); }
             reader.BaseStream.Position = Math.Min(reader.BaseStream.Length, start + length + (length & 1));
         }
-        if (data == null || data.Length == 0 || format.FormatTag != 1 || format.Channels is < 1 or > 2 || format.BitsPerSample != 16 || format.AverageBytesPerSecond == 0) throw new InvalidDataException("Piper must produce PCM16 mono/stereo audio.");
+        if (data == null || data.Length == 0 || format.FormatTag != 1 || format.Channels is < 1 or > 2 || format.BitsPerSample != 16
+            || format.SamplesPerSecond is < 8000 or > 192000 || format.BlockAlign != format.Channels * 2 || data.Length % format.BlockAlign != 0)
+            throw new InvalidDataException("Speech output must be PCM16 mono/stereo audio.");
+        return new(data, (int)format.SamplesPerSecond, format.Channels);
+    }
+
+    internal static async Task PlayAsync(PcmAudio audio, int device, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var align = (ushort)(audio.Channels * 2);
+        var format = new WaveFormat { FormatTag = 1, Channels = audio.Channels, SamplesPerSecond = (uint)audio.SampleRate,
+            AverageBytesPerSecond = (uint)audio.SampleRate * align, BlockAlign = align, BitsPerSample = 16 };
+        // Keep the device open through a short silent tail so buffered speech reaches the speakers.
+        var silence = new byte[audio.SampleRate * 120 / 1000 * align];
+        using var buffer = new NativeBuffer(audio.Samples.Length + silence.Length);
         Check(waveOutOpen(out var handle, unchecked((uint)device), ref format, IntPtr.Zero, UIntPtr.Zero, 0), "open playback device");
-        using var buffer = new NativeBuffer(data.Length);
+        var playing = false;
         try
         {
-            Marshal.Copy(data, 0, buffer.Data, data.Length);
+            Marshal.Copy(audio.Samples, 0, buffer.Data, audio.Samples.Length);
+            Marshal.Copy(silence, 0, IntPtr.Add(buffer.Data, audio.Samples.Length), silence.Length);
             Check(waveOutPrepareHeader(handle, buffer.Header, HeaderSize), "prepare playback"); buffer.Prepared = true;
             Check(waveOutWrite(handle, buffer.Header, HeaderSize), "start playback");
+            playing = true;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(data.Length / (double)format.AverageBytesPerSecond + 15));
+            timeout.CancelAfter(TimeSpan.FromSeconds((audio.Samples.Length + silence.Length) / (double)format.AverageBytesPerSecond + 15));
             while ((Marshal.PtrToStructure<WaveHeader>(buffer.Header).Flags & HeaderDone) == 0) await Task.Delay(20, timeout.Token);
+            playing = false;
         }
         finally
         {
-            waveOutReset(handle);
+            if (playing) waveOutReset(handle);
             if (buffer.Prepared) waveOutUnprepareHeader(handle, buffer.Header, HeaderSize);
             waveOutClose(handle);
         }

@@ -59,6 +59,9 @@ public sealed class AppConfig
             throw new InvalidDataException("Permission lists cannot be null.");
         if (Audio.SampleRate!=16000 || Audio.PushToTalkVirtualKey is <1 or >254 || Audio.InputDeviceId < -1 || Audio.OutputDeviceId < -1 || !double.IsFinite(Audio.SpeechRate) || Audio.SpeechRate is <0.5 or >2 || !double.IsFinite(Audio.SpeakerMatchThreshold))
             throw new InvalidDataException("Invalid audio device, sample rate, hotkey, speed or speaker threshold.");
+        if (Audio.TtsEngine is not ("qwen" or "piper") || Audio.QwenTtsDevice is not ("auto" or "cpu") ||
+            Audio.QwenTtsVoice is not ("aiden" or "dylan" or "eric" or "ono_anna" or "ryan" or "serena" or "sohee" or "uncle_fu" or "vivian"))
+            throw new InvalidDataException("Invalid speech engine, Qwen3-TTS device or voice.");
         if (Model.Threads<1 || !double.IsFinite(Model.Temperature) || Model.Temperature is <0 or >2 || Model.StartupTimeoutSeconds<5)
             throw new InvalidDataException("Invalid model threads, temperature or startup timeout.");
         foreach (var directory in Permissions.ReadableDirectories) Tools.TextFileReader.ReadableRoot(paths,directory);
@@ -69,6 +72,7 @@ public sealed class AppConfig
             throw new InvalidDataException("Invalid internet/search configuration.");
         foreach (var path in new[] { CharacterFile, Model.Executable, Model.ModelFile, Model.ProjectorFile, Audio.WhisperExecutable, Audio.WhisperModel, Audio.PiperExecutable, Audio.PiperModel })
             paths.Inside(path);
+        if (Audio.UsesExpressiveVoice) { paths.Inside(Audio.QwenTtsExecutable); paths.Inside(Audio.QwenTtsModel); }
     }
 }
 

@@ -1,6 +1,6 @@
 ﻿param(
     [ValidateSet('vulkan','cpu')][string]$Backend = 'vulkan',
-    [ValidateSet('All','Runtimes','Models','Llama','Whisper','Piper')][string]$Only = 'All',
+    [ValidateSet('All','Runtimes','Models','Llama','Whisper','Piper','Qwen-TTS')][string]$Only = 'All',
     [switch]$SkipModels,
     [switch]$SkipBuild
 )
@@ -17,11 +17,13 @@ if (Test-Path -LiteralPath $lockPath) {
     foreach ($loadedRecord in $loadedRecords) { $installed += $loadedRecord }
 }
 $total = 0L
+$componentOnly = $Only -in @('Llama','Whisper','Piper','Qwen-TTS')
+$includeCommon = $Only -ne 'Qwen-TTS'
 foreach ($item in $manifest.artifacts) {
     if ($item.backend -and $item.backend -ne $Backend) { continue }
     if ($Only -eq 'Runtimes' -and $item.kind -ne 'runtime') { continue }
     if ($Only -eq 'Models' -and $item.kind -ne 'model') { continue }
-    if ($Only -in @('Llama','Whisper','Piper') -and $item.component -ne $Only.ToLowerInvariant() -and $item.component -ne 'common') { continue }
+    if ($componentOnly -and $item.component -ne $Only.ToLowerInvariant() -and -not ($includeCommon -and $item.component -eq 'common')) { continue }
     if ($SkipModels -and $item.kind -eq 'model') { continue }
     $total += $item.bytes
 }
@@ -30,7 +32,7 @@ foreach ($item in $manifest.artifacts) {
     if ($item.backend -and $item.backend -ne $Backend) { continue }
     if ($Only -eq 'Runtimes' -and $item.kind -ne 'runtime') { continue }
     if ($Only -eq 'Models' -and $item.kind -ne 'model') { continue }
-    if ($Only -in @('Llama','Whisper','Piper') -and $item.component -ne $Only.ToLowerInvariant() -and $item.component -ne 'common') { continue }
+    if ($componentOnly -and $item.component -ne $Only.ToLowerInvariant() -and -not ($includeCommon -and $item.component -eq 'common')) { continue }
     if ($SkipModels -and $item.kind -eq 'model') { continue }
     $file = Receive-PortableFile $item.url $item.path $item.sha256
     if ($item.kind -eq 'runtime') {

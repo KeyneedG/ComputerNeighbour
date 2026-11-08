@@ -24,7 +24,7 @@ public sealed class WindowsDesktop(PlatformOptions options)
         var window = GetForegroundWindow();
         var title = new StringBuilder(1024);
         GetWindowText(window, title, title.Capacity);
-        if (IsExcluded(title.ToString())) return "[Excluded private window: observation paused]";
+        if (IsExcluded(title.ToString())) return "[Private window title hidden]";
         GetWindowThreadProcessId(window, out var processId);
         string name;
         try { using var process = Process.GetProcessById((int)processId); name = process.ProcessName; }
@@ -106,9 +106,6 @@ public sealed class WindowsDesktop(PlatformOptions options)
     public byte[] CaptureScreenPng()
     {
         EnsureWindows();
-        var title = new StringBuilder(1024);
-        GetWindowText(GetForegroundWindow(), title, title.Capacity);
-        if (IsExcluded(title.ToString())) throw new InvalidOperationException("Screen observation is paused for this private window.");
         var sourceWidth = GetSystemMetrics(0);
         var sourceHeight = GetSystemMetrics(1);
         if (sourceWidth <= 0 || sourceHeight <= 0) throw new InvalidOperationException("No interactive desktop is available.");

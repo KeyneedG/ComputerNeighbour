@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
+using ComputerNeighbour.Audio;
 using ComputerNeighbour.Configuration;
 using ComputerNeighbour.Platform;
 
@@ -17,6 +18,7 @@ public interface IChatModel
 public interface ITurnContextModel
 {
     Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct);
+    Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>Task.FromResult<string?>(null);
 }
 
 public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, ITurnContextModel, IAsyncDisposable
@@ -27,6 +29,14 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
       "request":{"type":"string","maxLength":450},"uncertainty":{"type":"string","maxLength":180},"evidence":{"type":"string","maxLength":120}
     }}
     """);
+    private static readonly JsonElement[] SpeechSchemas=Enumerable.Range(1,SpeechDelivery.MaxDirectedSentences)
+        .Select(count=>JsonSerializer.SerializeToElement(new
+        {
+            type="object",additionalProperties=false,required=new[]{"emotions"},properties=new
+            {
+                emotions=new {type="array",minItems=count,maxItems=count,items=new {type="string",@enum=SpeechDelivery.EmotionNames}}
+            }
+        })).ToArray();
     private static readonly JsonElement SketchSchema=JsonSerializer.Deserialize<JsonElement>("""
     {"type":"object","additionalProperties":false,"required":["title","background","shapes"],"properties":{
       "title":{"type":"string","maxLength":80},"background":{"type":"string","pattern":"^#[0-9a-fA-F]{6}$"},
@@ -104,6 +114,8 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         purpose==GenerationPurpose.Sketch?RequestAsync(messages,true,.65,false,ct,SketchSchema,1350):
         RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct);
     public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,320);
+    public async Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>
+        await RequestAsync(messages,true,0,false,ct,SpeechSchemas[sentenceCount-1],140);
     private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null)
     {
         messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);

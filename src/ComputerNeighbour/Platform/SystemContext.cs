@@ -56,6 +56,13 @@ public sealed class SystemContext
         return FormattableString.Invariant($"System memory: {status.MemoryLoad}% in use; {status.AvailablePhysical / gib:F1} GiB available of {status.TotalPhysical / gib:F1} GiB.");
     }
 
+    internal static bool HasMemoryHeadroom(ulong bytes)
+    {
+        var status = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
+        return OperatingSystem.IsWindows() && GlobalMemoryStatusEx(ref status)
+            && status.AvailablePhysical >= bytes && status.AvailablePageFile >= bytes;
+    }
+
     private string DescribeOwnCpu()
     {
         lock (sampleGate)
