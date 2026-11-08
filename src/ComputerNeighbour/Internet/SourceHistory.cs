@@ -8,7 +8,13 @@ public sealed class SourceHistory(PortablePaths paths)
 {
     private IReadOnlyList<WebCitation> sources=Array.Empty<WebCitation>();
     private bool loaded;
+    private bool InMemory { get; init; }
     public IReadOnlyList<WebCitation> Sources=>sources;
+    internal async Task<SourceHistory> ForkInMemoryAsync(CancellationToken ct)
+    {
+        await InitializeAsync(ct);
+        return new(paths) { sources=sources,loaded=true,InMemory=true };
+    }
     public async Task InitializeAsync(CancellationToken ct)
     {
         if(loaded)return;
@@ -22,12 +28,14 @@ public sealed class SourceHistory(PortablePaths paths)
         await InitializeAsync(ct);
         var next=actual.Where(s=>WebParsing.IsWebUrl(s.Url)).DistinctBy(s=>s.Url).Take(20).ToArray();
         if(next.Length==0)return;
+        if(InMemory){ct.ThrowIfCancellationRequested();sources=next;return;}
         var file=paths.Inside("data/memory/web-sources.json");Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         var temp=paths.Inside("data/memory/web-sources.json.tmp");
         await File.WriteAllTextAsync(temp,JsonSerializer.Serialize(next,AppConfig.Json),ct);File.Move(temp,file,true);sources=next;
     }
     public async Task ClearAsync(CancellationToken ct)
     {
+        if(InMemory){ct.ThrowIfCancellationRequested();sources=[];return;}
         var file=paths.Inside("data/memory/web-sources.json");Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         var temp=paths.Inside("data/memory/web-sources.json.tmp");await File.WriteAllTextAsync(temp,"[]",ct);File.Move(temp,file,true);sources=[];loaded=true;
     }

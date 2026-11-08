@@ -75,15 +75,16 @@ public static class Program
             ui.Write($"ComputerNeighbour {version} · {config.CharacterName}\nModel: {Path.GetFileName(config.Model.ModelFile)}\nStarting local model; this may take a moment. /help for commands.");
             await model.StartAsync(shutdown.Token);
             using var weather=new WeatherService(config);
-            await using var engine=new CompanionEngine(paths,config,model,memory,emotions,desktop,audio,ui,weather);
-            await engine.GetRelationshipAsync(shutdown.Token);
+            await using var regularEngine=new CompanionEngine(paths,config,model,memory,emotions,desktop,audio,ui,weather);
+            await regularEngine.GetRelationshipAsync(shutdown.Token);
+            await using var sessions=new CompanionSession(regularEngine,ui);
             var keyName=config.Audio.PushToTalkVirtualKey is >=0x70 and <=0x87?$"F{config.Audio.PushToTalkVirtualKey-0x6F}":$"VK 0x{config.Audio.PushToTalkVirtualKey:X2}";
             ui.Write($"Ready. Type English or Russian. Hold {keyName} to talk. Replies are English.\nMicrophone={config.Permissions.Microphone}; screen={config.Permissions.ScreenCapture}; computer input={config.Permissions.DesktopInput}.");
             if(memory.RecoveryNotice is {} notice)ui.Write(notice);
             var queue=Channel.CreateBounded<AppEvent>(new BoundedChannelOptions(16) { SingleReader=true,FullMode=BoundedChannelFullMode.Wait });
-            var input=ReadInputAsync(queue.Writer,ui,engine,shutdown.Token);
-            var microphone=MicrophoneAsync(queue.Writer,config,desktop,audio,ui,engine,shutdown.Token);
-            var timer=TimerAsync(queue.Writer,config,engine,shutdown.Token);
+            var input=ReadInputAsync(queue.Writer,ui,sessions,shutdown.Token);
+            var microphone=MicrophoneAsync(queue.Writer,config,desktop,audio,ui,sessions,shutdown.Token);
+            var timer=TimerAsync(queue.Writer,config,sessions,shutdown.Token);
             var lastWindow="";var wasAway=false;var nextOpportunity=DateTimeOffset.Now.AddSeconds(config.Proactive.MinIntervalSeconds);var lastOpportunity=DateTimeOffset.MinValue;
             try
             {
@@ -92,6 +93,14 @@ public static class Program
                     try
                     {
                         if(evt.Kind=="exit")break;
+                        if(evt.Kind=="text"&&await sessions.TryHandleCommandAsync(evt.Text,shutdown.Token))
+                        {
+                            ui.SetIncognito(sessions.Current.Engine.IsIncognito);
+                            continue;
+                        }
+                        var active=sessions.Current;
+                        if(evt.Session is not null&&!ReferenceEquals(evt.Session,active))continue;
+                        var engine=active.Engine;
                         if(evt.Kind=="text" && evt.Text.StartsWith('/'))
                         {
                             if(await engine.TryHandleAccessCommandAsync(evt.Text,shutdown.Token))continue;
@@ -100,18 +109,21 @@ public static class Program
                             {
                                 case "/exit":case "/quit": shutdown.Cancel();break;
                                 case "/help": ui.Write(Help);break;
-                                case "/status": ui.Write($"Root: {paths.Root}\n{emotions.Status}\n{engine.NeedsStatus}\n{engine.AccessStatus}\nMemory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={engine.Paused}; mute={engine.Muted}.");break;
+                                case "/status": ui.Write(engine.DescribeStatus());break;
                                 case "/pause": engine.Paused=true;engine.InterruptSpeech();ui.Write("Background observation and proactive comments paused. You can still ask me to look.");break;
                                 case "/resume": engine.Paused=false;ui.Write("Background observation and proactive comments resumed.");break;
                                 case "/mute": engine.Muted=!engine.Muted;engine.InterruptSpeech();ui.Write("Voice muted: "+engine.Muted);break;
                                 case "/devices": ui.Write(audio.DescribeDevices());break;
-                                case "/enroll": audio.EnrollSpeaker(arg);ui.Write("Hold your push-to-talk key and speak alone for several seconds to enroll: "+arg);break;
+                                case "/enroll":
+                                    if(engine.IsIncognito)ui.Write("Voice enrollment is available in the regular session.");
+                                    else {audio.EnrollSpeaker(arg);ui.Write("Hold your push-to-talk key and speak alone for several seconds to enroll: "+arg);}
+                                    break;
                                 case "/approve": if(int.TryParse(arg,out var approve))await engine.ApproveAsync(approve,shutdown.Token);else ui.Write("Usage: /approve NUMBER");break;
                                 case "/reject": if(int.TryParse(arg,out var reject))engine.Reject(reject);else ui.Write("Usage: /reject NUMBER");break;
-                                case "/memory": ui.Write("Durable memory:\n"+memory.Summary);break;
+                                case "/memory": ui.Write((engine.IsIncognito?"Incognito memory:\n":"Durable memory:\n")+engine.MemorySummary);break;
                                 case "/thoughts": ui.Write(await engine.GetThoughtsAsync(shutdown.Token));break;
                                 case "/relationship": ui.Write(await engine.GetRelationshipAsync(shutdown.Token));break;
-                                case "/character": ui.Write(config.CharacterName+"'s developing character:\n"+emotions.DescribeGrowth());break;
+                                case "/character": ui.Write(config.CharacterName+"'s developing character:\n"+engine.DescribeCharacter());break;
                                 case "/browser": await engine.RespondAsync("Read the current browser page and summarize it.","user",false,false,shutdown.Token);break;
                                 case "/read": await engine.RespondAsync("Read "+arg,"user",false,false,shutdown.Token);break;
                                 case "/search": await engine.RespondAsync("Search for "+arg,"user",false,false,shutdown.Token);break;
@@ -127,8 +139,12 @@ public static class Program
                                 default: ui.Write("Unknown command. /help");break;
                             }
                         }
-                        else if(evt.Kind is "text" or "voice") await engine.RespondAsync(evt.Text,evt.Speaker,false,false,shutdown.Token);
-                        else if(evt.Kind=="tick")
+                        else if(evt.Kind is "text" or "voice")
+                        {
+                            if(evt.Kind=="voice")ui.Write($"[{evt.Speaker}; confidence {evt.SpeakerConfidence:F2}] {evt.Text}");
+                            await engine.RespondAsync(evt.Text,evt.Speaker,false,false,shutdown.Token);
+                        }
+                        else if(evt.Kind=="tick"&&!engine.IsIncognito)
                         {
                             var now=DateTimeOffset.Now;
                             if(await engine.DeliverWorkTaskReminderAsync(now,shutdown.Token))continue;
@@ -162,19 +178,20 @@ public static class Program
                 }
             }
             finally { shutdown.Cancel();await Task.WhenAll(input,microphone,timer); }
-            ui.Write("Goodbye. Memory saved locally.");return 0;
+            ui.Write(sessions.Current.Engine.IsIncognito?"Goodbye. Incognito changes discarded.":"Goodbye. Memory saved locally.");return 0;
         }
         catch(OperationCanceledException) {ui.Write("Stopped.");return 0;}
         catch(Exception ex) {ui.Write("[Startup] "+ex.Message);return 1;}
     }
     public static bool IsQuietHour(int hour,int start,int end)=>start==end?false:start<end?hour>=start&&hour<end:hour>=start||hour<end;
-    private static async Task ReadInputAsync(ChannelWriter<AppEvent> writer,ConsoleUi ui,CompanionEngine engine,CancellationToken ct)
+    private static async Task ReadInputAsync(ChannelWriter<AppEvent> writer,ConsoleUi ui,CompanionSession sessions,CancellationToken ct)
     {
         try
         {
             while(!ct.IsCancellationRequested)
             {
                 var line=await ui.ReadLineAsync(ct);
+                var engine=sessions.Current.Engine;
                 if(line is null)
                 {
                     engine.InterruptActivity();
@@ -192,20 +209,30 @@ public static class Program
         }
         catch(OperationCanceledException) { }
     }
-    private static async Task MicrophoneAsync(ChannelWriter<AppEvent> writer,AppConfig config,WindowsDesktop desktop,AudioService audio,ConsoleUi ui,CompanionEngine engine,CancellationToken ct)
+    private static async Task MicrophoneAsync(ChannelWriter<AppEvent> writer,AppConfig config,WindowsDesktop desktop,AudioService audio,ConsoleUi ui,CompanionSession sessions,CancellationToken ct)
     {
         if(!config.Permissions.Microphone || !config.Audio.Enabled)return;
         try
         {
             while(!ct.IsCancellationRequested)
             {
-                if(!desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey)) {await Task.Delay(25,ct);continue;}
+                var started=sessions.Current;
+                var engine=started.Engine;
+                if(engine.IsIncognito||started.InputToken.IsCancellationRequested||!desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey))
+                {await Task.Delay(25,ct);continue;}
+                using var capture=CancellationTokenSource.CreateLinkedTokenSource(ct,started.InputToken);
+                if(capture.IsCancellationRequested)continue;
                 engine.ObserveBrowser();engine.BeginListening();ui.Write("[Microphone] Listening while key is held…");
                 try
                 {
-                    var captured=await audio.ListenWhileHeldAsync(()=>desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey),ct);
-                    if(captured is not null) {var speaker=captured.IsKnownSpeaker?captured.SpeakerId:"unidentified-"+DateTimeOffset.Now.ToString("HHmmssfff");ui.Write($"[{speaker}; confidence {captured.SpeakerConfidence:F2}] {captured.Text}");await writer.WriteAsync(new("voice",captured.Text,speaker),ct);}
+                    var captured=await audio.ListenWhileHeldAsync(()=>desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey),capture.Token);
+                    if(captured is not null&&!capture.IsCancellationRequested&&ReferenceEquals(started,sessions.Current))
+                    {
+                        var speaker=captured.IsKnownSpeaker?captured.SpeakerId:"unidentified-"+DateTimeOffset.Now.ToString("HHmmssfff");
+                        await writer.WriteAsync(new("voice",captured.Text,speaker,started,captured.SpeakerConfidence),capture.Token);
+                    }
                 }
+                catch(OperationCanceledException) when(!ct.IsCancellationRequested) { }
                 catch(Exception ex) when(ex is not OperationCanceledException) {ui.Write("[Microphone] "+ex.Message);}
                 finally {engine.EndListening();}
                 while(desktop.IsKeyDown(config.Audio.PushToTalkVirtualKey))await Task.Delay(25,ct);
@@ -213,9 +240,23 @@ public static class Program
         }
         catch(OperationCanceledException) { }
     }
-    private static async Task TimerAsync(ChannelWriter<AppEvent> writer,AppConfig config,CompanionEngine engine,CancellationToken ct)
+    private static async Task TimerAsync(ChannelWriter<AppEvent> writer,AppConfig config,CompanionSession sessions,CancellationToken ct)
     {
-        try {using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(500));var next=DateTimeOffset.Now;while(await timer.WaitForNextTickAsync(ct)){engine.ObserveBrowser();if(DateTimeOffset.Now>=next){writer.TryWrite(new("tick","","environment"));next=DateTimeOffset.Now.AddSeconds(config.Proactive.CheckSeconds);}}}catch(OperationCanceledException) { }
+        try
+        {
+            using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+            var next=DateTimeOffset.Now;
+            while(await timer.WaitForNextTickAsync(ct))
+            {
+                var active=sessions.Current;
+                if(active.Engine.IsIncognito||active.InputToken.IsCancellationRequested)continue;
+                active.Engine.ObserveBrowser();
+                if(DateTimeOffset.Now<next)continue;
+                writer.TryWrite(new("tick","","environment",active));
+                next=DateTimeOffset.Now.AddSeconds(config.Proactive.CheckSeconds);
+            }
+        }
+        catch(OperationCanceledException) { }
     }
     private static void Diagnose(PortablePaths paths,AppConfig config,AudioService audio,ConsoleUi ui)
     {
@@ -227,7 +268,7 @@ public static class Program
                 ui.Write($"{(File.Exists(paths.Inside(path))?"OK":"MISSING")} {path}");
         ui.Write(audio.DescribeDevices());
     }
-    private sealed record AppEvent(string Kind,string Text,string Speaker);
+    private sealed record AppEvent(string Kind,string Text,string Speaker,CompanionSession.View? Session=null,double SpeakerConfidence=0);
     private const string Help="""
     Type a message in English or Russian. Evelyn answers in English.
     Hold F10 (configurable) to record; release to transcribe. Ctrl+C or /exit to quit.
@@ -250,6 +291,8 @@ public static class Program
     /character     Show developing and established habits and interests
     /tasks         List saved work tasks and upcoming reminders
     /task          Show task commands for saving, resuming, and linking materials
+    /start incognito  Start a temporary copy of the current session for text experiments
+    /stop incognito   Discard the temporary state and return to the regular session
     /compact       Compact memory now with the model
     /forget CONFIRM Erase conversation memory and saved tasks
     /approve N     Approve a displayed computer action (expires in 2 minutes)

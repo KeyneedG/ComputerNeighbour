@@ -40,6 +40,7 @@ public sealed class UserProfileStore
     private readonly PortablePaths paths;
     private readonly string fallbackName;
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly bool inMemory;
     private ProfileState state;
     private bool initialized;
 
@@ -49,6 +50,18 @@ public sealed class UserProfileStore
         this.fallbackName = MeaningfulFallback(fallbackName);
         state = Fresh();
     }
+
+    private UserProfileStore(UserProfileStore source)
+    {
+        source.EnsureInitialized();
+        paths = source.paths;
+        fallbackName = source.fallbackName;
+        state = Volatile.Read(ref source.state);
+        initialized = true;
+        inMemory = true;
+    }
+
+    internal UserProfileStore ForkInMemory() => new(this);
 
     /// <summary>Empty means not known. The internal speaker label "user" is never presented as a person's name.</summary>
     public string PreferredName => Volatile.Read(ref state).PreferredName;
@@ -152,8 +165,9 @@ public sealed class UserProfileStore
             var reset = Fresh();
             await SaveAsync(reset, keepBackup: false, cancellationToken);
             // Replace recovery copies with the reset rather than leaving forgotten facts available on recovery.
-            foreach (var relative in new[] { RelativeFile + ".bak", RelativeFile + ".corrupt" })
-                if (File.Exists(paths.Inside(relative))) await File.WriteAllTextAsync(paths.Inside(relative), JsonSerializer.Serialize(reset, Json), cancellationToken);
+            if (!inMemory)
+                foreach (var relative in new[] { RelativeFile + ".bak", RelativeFile + ".corrupt" })
+                    if (File.Exists(paths.Inside(relative))) await File.WriteAllTextAsync(paths.Inside(relative), JsonSerializer.Serialize(reset, Json), cancellationToken);
             Volatile.Write(ref state, reset);
             RecoveryNotice = null;
         }
@@ -232,6 +246,7 @@ public sealed class UserProfileStore
 
     private async Task SaveAsync(ProfileState next, bool keepBackup, CancellationToken cancellationToken)
     {
+        if (inMemory) { cancellationToken.ThrowIfCancellationRequested(); return; }
         var file = paths.Inside(RelativeFile);var temporary = paths.Inside(RelativeFile + ".tmp");
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         try

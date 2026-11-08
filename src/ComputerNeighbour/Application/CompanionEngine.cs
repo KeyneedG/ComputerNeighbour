@@ -32,15 +32,15 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     private const string OpenThreadGuidance="When there is a natural opening, pick up one specific unfinished topic the main user showed interest in. Use the latest exchange to check whether it is still open. Leave resolved topics, declined topics, and unanswered follow-ups alone.";
     private readonly IBrowserReader browser=browserReader??new WindowsBrowserReader(config.Browser,config.Desktop,config.Permissions.ReadWeb);
     private readonly IWebResearch web=webResearch??new HttpWebResearch(config.Internet);
-    private readonly SourceHistory sourceHistory=new(paths);
-    private readonly ThoughtJournal thoughtJournal=new(paths);
+    private SourceHistory sourceHistory=new(paths);
+    private ThoughtJournal thoughtJournal=new(paths);
     private ThoughtNote? currentThought;
     private readonly List<WebCitation> turnSources=[];
     private bool researchAuthorized;
     private ToolRegistry? toolRegistry;
     private ToolRegistry tools=>toolRegistry??=ToolRegistry.BuiltIn(new(paths,config,desktop,browser,web,openDocuments));
     private readonly FileWorkspace fileWorkspace=new(paths,config.Permissions.WritableDirectories,config.Permissions.MaxWritableFileBytes);
-    private readonly UserProfileStore profile=new(paths.Root,config.UserName);
+    private UserProfileStore profile=new(paths.Root,config.UserName);
     private readonly CompanionNeeds needs=new(config.Needs,emotions.State.Needs);
     private bool profileReady;
     private bool hasUserInteracted;
@@ -51,7 +51,11 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         get
         {
             var name=string.IsNullOrEmpty(profile.PreferredName)?config.UserName:profile.PreferredName;
-            if(relationshipStore is null||relationshipName!=name){relationshipName=name;relationshipStore=new(paths.Root,name);}
+            if(relationshipStore is null||relationshipName!=name)
+            {
+                relationshipStore=IsIncognito?relationshipStore!.ForkInMemory(name):new(paths.Root,name);
+                relationshipName=name;
+            }
             return relationshipStore;
         }
     }
@@ -260,9 +264,9 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         var forceWork=false;
         if(!proactive)
         {
-            if(IsAccessCommand(input))
+            if(IsAccessCommand(input)||CompanionSession.IsIncognitoCommand(input))
             {
-                ui.Write("Use the console to change computer access.");
+                ui.Write("Use the console to change the session mode or computer access.");
                 return;
             }
             var request=input.Trim();
@@ -353,6 +357,11 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         }
         if(explicitIntent is {} explicitTool)
         {
+            if(IsIncognito&&tools.ChangesComputer(explicitTool))
+            {
+                await DeliverReplyAsync(IncognitoAccessMessage,false,ct);
+                return;
+            }
             var autoApprove=ownerTurn&&tools.ChangesComputer(explicitTool)&&(TakeTaskDelegation()||accessMode==AccessMode.Full);
             if(RequiresSessionApproval(explicitTool,autoApprove))
             {
@@ -449,6 +458,11 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             var results=new List<ToolResult>();
             foreach(var request in decision.Actions.Take(3))
             {
+                if(IsIncognito&&tools.ChangesComputer(request))
+                {
+                    results.Add(new(request.Tool,false,IncognitoAccessMessage));
+                    continue;
+                }
                 var requiresApproval=RequiresSessionApproval(request);
                 await AnnounceToolAsync(request,requiresApproval,ct);
                 if(requiresApproval)
@@ -479,6 +493,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     private static bool IsResearchTool(string name)=>name.Equals("search_web",StringComparison.OrdinalIgnoreCase)||name.Equals("read_web",StringComparison.OrdinalIgnoreCase)||name.Equals("read_browser",StringComparison.OrdinalIgnoreCase);
     private async Task<ToolResult> ExecuteToolAsync(ToolRequest request,bool approved,CancellationToken ct)
     {
+        if(IsIncognito&&tools.ChangesComputer(request))return new(request.Tool,false,IncognitoAccessMessage);
         if(desktopInputOverride==false&&IsWorkInput(request.Tool.ToLowerInvariant()))
             return new(request.Tool,false,"Desktop input is disabled for this session.");
         if(IsResearchTool(request.Tool)&&(!researchAuthorized))
@@ -655,6 +670,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
 
     private async Task<int> QueueApprovalAsync(ToolRequest request,bool autonomous,CancellationToken ct,WorkRun? work=null,bool canDelegate=false)
     {
+        if(IsIncognito)throw new UnauthorizedAccessException(IncognitoAccessMessage);
         PrunePendingActions();
         var duplicate=pending.FirstOrDefault(p=>p.Value.Work==work&&p.Value.Request.Tool==request.Tool&&JsonSerializer.Serialize(p.Value.Request.Args)==JsonSerializer.Serialize(request.Args));
         if(duplicate.Key>0)return duplicate.Key;
@@ -755,7 +771,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             $"Identity: you are {config.CharacterName}. The current speaker is {speaker}.\n"+
             $"Your current attitude toward the main user (characterization data): {relationship.State.CurrentAttitude}\n"+
             GrowthContext()+"\n"+
-            profile.DescribeContext()+$"\nApp facts: conversation, profile and relationship persist locally across restarts. This Windows app takes and interprets real desktop screenshots on request when screen capture is enabled. The user does not have to upload a screenshot. The app also reads named Notepad tabs and local text files, reads open browser pages, and searches or fetches public web sources. Screen capture enabled={config.Permissions.ScreenCapture}, background observation paused={Paused}, file reading enabled={config.Permissions.ReadFiles}, open Notepad reading enabled={config.Permissions.ReadOpenDocuments}, browser reading enabled={config.Permissions.ReadBrowser&&config.Browser.Enabled}, live web reading enabled={config.Permissions.ReadWeb}, live internet search enabled={config.Permissions.SearchWeb}. An attached image is a real new desktop screenshot. A previous completed observation was real; an absence of a new screenshot in this turn does not invalidate it. Claim only results that the app has supplied.\n"+
+            profile.DescribeContext()+$"\nApp facts: {SessionMemoryContext} This Windows app takes and interprets real desktop screenshots on request when screen capture is enabled. The user does not have to upload a screenshot. The app also reads named Notepad tabs and local text files, reads open browser pages, and searches or fetches public web sources. Screen capture enabled={config.Permissions.ScreenCapture}, background observation paused={Paused}, file reading enabled={config.Permissions.ReadFiles}, open Notepad reading enabled={config.Permissions.ReadOpenDocuments}, browser reading enabled={config.Permissions.ReadBrowser&&config.Browser.Enabled}, live web reading enabled={config.Permissions.ReadWeb}, live internet search enabled={config.Permissions.SearchWeb}. An attached image is a real new desktop screenshot. A previous completed observation was real; an absence of a new screenshot in this turn does not invalidate it. Claim only results that the app has supplied.\n"+
             (lastScreenObservation is {} observed?$"Verified evidence: a real screenshot was captured and analyzed earlier in this session at {observed.At:HH:mm}. It is historical evidence only.\n":"")+
             $"Current tone: {CurrentTone()}. {NeedsContext()} Discuss concrete interests and reactions, rather than the mechanics of producing a reply.\n";
         if(image is not null)system+="The attached screen is incidental shared context. Stay on the conversational thread and bring up the image only if it matters to what the user said.\n";
@@ -783,7 +799,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             catch(Exception ex) when(attempt==0&&effort!=WorkEffort.Quick&&(ex is InvalidDataException or HttpRequestException||ex is OperationCanceledException&&!ct.IsCancellationRequested))
             {currentThought?.Check("The deeper pass was unavailable; I retried with the ordinary model pass.");continue;}
             var confused=ReplyQuality.HasIdentityConfusion(candidate,config.CharacterName,profile.PreferredName);
-            var falseMemory=ReplyQuality.DeniesPersistentMemory(candidate);
+            var falseMemory=!IsIncognito&&ReplyQuality.DeniesPersistentMemory(candidate);
             var falseCapability=ReplyQuality.DeniesToolAccess(candidate,config.Permissions.ScreenCapture||lastScreenObservation is not null,config.Permissions.ReadFiles,config.Permissions.SearchWeb||config.Permissions.ReadWeb);
             var inventedObservation=image is null&&ReplyQuality.ClaimsFreshScreenObservation(candidate);
             var hasVoiceDirections=spokenReply&&ReplyQuality.ContainsVoiceDirection(candidate);
@@ -845,6 +861,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         {{{tools.Describe()}}}
         CHARACTER:
         {{{character}}}
+        {{{SessionMemoryContext}}}
         {{{GrowthContext()}}}
         ATTRIBUTION EXAMPLE: if the user says "мой любимый цвет синий", reply "I'll remember that blue is your favourite colour." and save "Speaker user prefers blue." Never turn the user's facts into your own preferences. Acknowledge memory naturally; do not translate the user's request as if you said it.
         GROUNDED USER PROFILE:
@@ -953,6 +970,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     }
     public async Task ApproveAsync(int id,CancellationToken ct)
     {
+        if(IsIncognito){ui.Write(IncognitoAccessMessage);return;}
         if(!pending.Remove(id,out var item)) { ui.Write("No such pending action.");return; }
         if(DateTimeOffset.Now-item.At>TimeSpan.FromMinutes(2)) { ui.Write("Action expired; ask again.");return; }
         if(item.Work is {} work){await RunWorkAsync(work,ct,item);return;}
@@ -984,6 +1002,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         InterruptActivity();InterruptSpeech();
         await speech;
         lock(speechGate){speechCancellation?.Dispose();speechCancellation=null;}
-        await emotions.SaveNeedsAsync(needs.Levels,CancellationToken.None);
+        if(IsIncognito)weather.Dispose();
+        else await emotions.SaveNeedsAsync(needs.Levels,CancellationToken.None);
     }
 }

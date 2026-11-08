@@ -8,13 +8,29 @@ public sealed class ConsoleUi : ICompanionOutput
     private readonly object gate=new();
     private readonly StringBuilder input=new();
     private bool reading;
+    private bool incognito;
+    private string Prompt=>incognito?"[Incognito] > ":"> ";
+
+    internal void SetIncognito(bool active)
+    {
+        lock(gate)
+        {
+            if(incognito==active)return;
+            incognito=active;
+            if(reading&&!Console.IsOutputRedirected)
+            {
+                ClearInput();
+                Console.Write(Prompt+input);
+            }
+        }
+    }
     public void Write(string text)
     {
         lock(gate)
         {
             if(reading && !Console.IsOutputRedirected) ClearInput();
             Console.WriteLine(Sanitize(text));
-            if(reading && !Console.IsOutputRedirected) Console.Write("> "+input);
+            if(reading && !Console.IsOutputRedirected) Console.Write(Prompt+input);
         }
     }
     public static string Sanitize(string text)=>new(text.Where(c=>c is '\n' or '\t' || !char.IsControl(c)).ToArray());
@@ -26,7 +42,7 @@ public sealed class ConsoleUi : ICompanionOutput
     public async Task<string?> ReadLineAsync(CancellationToken ct)
     {
         if(Console.IsInputRedirected) return await Console.In.ReadLineAsync(ct);
-        lock(gate) { reading=true;input.Clear();Console.Write("> "); }
+        lock(gate) { reading=true;input.Clear();Console.Write(Prompt); }
         try
         {
             while(true)

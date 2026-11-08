@@ -5,6 +5,7 @@ using ComputerNeighbour.Configuration;
 using ComputerNeighbour.ConsoleInterface;
 using ComputerNeighbour.Context;
 using ComputerNeighbour.Inference;
+using ComputerNeighbour.Internet;
 using ComputerNeighbour.Memory;
 using ComputerNeighbour.Personality;
 using ComputerNeighbour.Platform;
@@ -20,6 +21,105 @@ internal static class EngineTests
 
     public static async Task RunAsync(Suite suite)
     {
+        await suite.Case("incognito uses the current context and discards all experimental state on exit", async root =>
+        {
+            static string Attitude(string attitude, double trust) => JsonSerializer.Serialize(new CompanionDecision
+            {
+                Speak = false, Emotion = new() { Trust = trust, Reason = attitude },
+                Relationship = new() { CurrentAttitude = attitude }, Actions = []
+            }, AppConfig.Json);
+            var model = new ScriptedModel("The regular reply.", Attitude("REGULAR_ATTITUDE", .02), "REGULAR_SUMMARY",
+                "The experimental reply.", Attitude("EXPERIMENTAL_ATTITUDE", -.02),
+                "The sample screenshot shows an open test window.", "EXPERIMENTAL_SUMMARY");
+            await using var f = await Fixture.CreateAsync(root, model, capture: () => [1, 2, 3]);
+            f.Config.Permissions.ScreenCapture = true;
+            f.Config.Observation.KeepScreenshots = true;
+            var sources = new SourceHistory(new PortablePaths(root));
+            await sources.RecordAsync([new("Regular source", "https://example.org/baseline", DateTimeOffset.UtcNow, "article")], default);
+            await f.Engine.RespondAsync("Call me Alex. I am working on the blue bridge.", "user", false, false, default);
+            await f.Engine.CompactAsync(default);
+            await f.Engine.RespondAsync("/task save Regular | Goal | Progress | Keep working", "user", false, false, default);
+            await f.Engine.RespondAsync("write documents/normal.md | Reviewed before the experiment", "user", false, false, default);
+            var regularRelationship = await f.Engine.GetRelationshipAsync(default);
+            var regularStatus = f.Engine.DescribeStatus();
+            var regularNotes = await f.Engine.GetThoughtsAsync(default);
+            Dictionary<string, string> Snapshot() => Directory.EnumerateFiles(Path.Combine(root, "data"), "*", SearchOption.AllDirectories)
+                .ToDictionary(path => path, path => Convert.ToBase64String(File.ReadAllBytes(path)));
+            var before = Snapshot();
+            void CheckDisk()
+            {
+                var after = Snapshot();
+                Check.True(before.Count == after.Count && before.All(entry => after.TryGetValue(entry.Key, out var value) && value == entry.Value),
+                    "An experiment wrote, changed or erased regular files.");
+            }
+
+            await using var sessions = new CompanionSession(f.Engine, f.Output);
+            var regularView = sessions.Current;
+            Check.True(await sessions.TryHandleCommandAsync("/start incognito", default), "The incognito start command was not handled.");
+            var experimentalView = sessions.Current;
+            var experiment = experimentalView.Engine;
+            Check.True(experiment.IsIncognito && regularView.InputToken.IsCancellationRequested, "Incognito did not switch the active view.");
+            Check.Equal("REGULAR_SUMMARY", experiment.MemorySummary);
+            Check.True((await experiment.GetRelationshipAsync(default)).Contains("REGULAR_ATTITUDE"), "Incognito started without the existing relationship.");
+            await experiment.RespondAsync("Show the sources.", "user", false, false, default);
+            Check.True(f.Output.Lines.Last().Contains("https://example.org/baseline"), "Incognito missed the existing sources.");
+            await experiment.RespondAsync("Call me Jordan. Let's try a red boat.", "user", false, false, default);
+            var experimentalRelationship = await experiment.GetRelationshipAsync(default);
+            Check.True(experimentalRelationship.Contains("Main user: Jordan") &&
+                experimentalRelationship.Contains("EXPERIMENTAL_ATTITUDE"), "A renamed user lost their experimental relationship.");
+            Check.True(model.Calls[3].Messages[0].Text.Contains("REGULAR_SUMMARY"), "Incognito did not use the original memory in its reply.");
+            await experiment.RespondAsync("Describe the screen.", "user", false, true, default);
+            await experiment.CompactAsync(default);
+            Check.Equal("EXPERIMENTAL_SUMMARY", experiment.MemorySummary);
+            Check.True((await experiment.GetThoughtsAsync(default)).Contains("incognito", StringComparison.OrdinalIgnoreCase),
+                "Experimental turn notes were not available in memory.");
+            await experiment.RespondAsync("/task save Scratch | Test | Draft | Discard", "user", false, false, default);
+            await experiment.RespondAsync("/tasks", "user", false, false, default);
+            Check.True(f.Output.Lines.Last().Contains("Scratch") && f.Output.Lines.Last().Contains("Regular"), "The experiment did not isolate task changes.");
+            await sessions.TryHandleCommandAsync("/start incognito", default);
+            Check.True(ReferenceEquals(experimentalView, sessions.Current), "A repeated start reset an active experiment.");
+
+            await experiment.TryHandleAccessCommandAsync("/full access", default);
+            await experiment.RespondAsync("write documents/experimental.md | Private", "user", false, false, default);
+            await experiment.ApproveAsync(1, default);
+            Check.True(!File.Exists(Path.Combine(root, "documents", "experimental.md")) &&
+                !File.Exists(Path.Combine(root, "documents", "normal.md")), "Incognito executed a file change.");
+            experiment.Paused = false;
+            experiment.Muted = true;
+            await experiment.ForgetConversationAsync(default);
+            Check.Equal("", experiment.MemorySummary);
+            await experiment.RespondAsync("Show the sources.", "user", false, false, default);
+            Check.True(!f.Output.Lines.Last().Contains("https://example.org/baseline"), "Forget did not clear the experimental sources.");
+            CheckDisk();
+
+            Check.True(await sessions.TryHandleCommandAsync("/stop incognito", default), "The incognito stop command was not handled.");
+            Check.True(ReferenceEquals(f.Engine, sessions.Current.Engine) && experimentalView.InputToken.IsCancellationRequested,
+                "The original engine did not resume, or experimental input was still current.");
+            Check.Equal(regularStatus, f.Engine.DescribeStatus());
+            Check.Equal(regularRelationship, await f.Engine.GetRelationshipAsync(default));
+            Check.Equal(regularNotes, await f.Engine.GetThoughtsAsync(default));
+            Check.Equal("REGULAR_SUMMARY", f.Engine.MemorySummary);
+            Check.Equal("Regular", f.Memory.Tasks.Items.Single().Title);
+            CheckDisk();
+            await f.Engine.ApproveAsync(1, default);
+            Check.True(File.Exists(Path.Combine(root, "documents", "normal.md")), "The original pending action was lost.");
+        });
+
+        await suite.Case("closing incognito without stopping leaves the regular state available on restart", async root =>
+        {
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel());
+            await f.Engine.RespondAsync("/task save Regular | Goal | Progress | Keep working", "user", false, false, default);
+            await using (var sessions = new CompanionSession(f.Engine, f.Output))
+            {
+                await sessions.TryHandleCommandAsync("/start incognito", default);
+                await sessions.Current.Engine.ForgetConversationAsync(default);
+                await sessions.Current.Engine.RespondAsync("/task save Scratch | Test | Progress | Discard", "user", false, false, default);
+            }
+            var reopened = new MemoryStore(root, f.Config.Memory);
+            await reopened.InitializeAsync();
+            Check.Equal("Regular", reopened.Tasks.Items.Single().Title);
+        });
+
         await suite.Case("the first pass selects quick, standard and deep dialogue without granting tools", async root =>
         {
             var model = new WorkflowModel(

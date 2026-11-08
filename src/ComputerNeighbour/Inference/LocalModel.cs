@@ -84,6 +84,15 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     private readonly HttpClient client = new() { BaseAddress = new Uri(options.Endpoint.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds) };
     private Process? process;
     private Task? drainTask;
+    private int incognito;
+    private int suppressRuntimeLogs;
+
+    internal void SetIncognito(bool active)
+    {
+        // A child process can flush buffered diagnostics after a request has returned.
+        if (active) Volatile.Write(ref suppressRuntimeLogs, 1);
+        Volatile.Write(ref incognito, active ? 1 : 0);
+    }
     public async Task StartAsync(CancellationToken ct)
     {
         if (!options.AutoStart) { await WaitReadyAsync(ct); return; }
@@ -108,7 +117,9 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
             if (File.Exists(file) && new FileInfo(file).Length > 2_000_000) File.Move(file, file + ".previous", true);
             await using var writer = new StreamWriter(file, append: true) { AutoFlush = true };
             long written = 0;
-            while (await reader.ReadLineAsync() is { } line) { if (written < 4_000_000) { await writer.WriteLineAsync(line); written += line.Length; } }
+            while (await reader.ReadLineAsync() is { } line)
+                if (Volatile.Read(ref suppressRuntimeLogs) == 0 && written < 4_000_000)
+                { await writer.WriteLineAsync(line); written += line.Length; }
         }
         catch (IOException) { }
     }
@@ -147,6 +158,7 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);
         var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:image/png;base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
         var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = maxTokens??(json||dialogue ? options.MaxReplyTokens : 1800), ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = thinkingBudget>0 } };
+        if(Volatile.Read(ref incognito)!=0)body["cache_prompt"]=false;
         if(thinkingBudget>0)body["thinking_budget_tokens"]=thinkingBudget;
         if(dialogue){body["repeat_penalty"]=1.1;body["repeat_last_n"]=256;body["top_p"]=0.9;}
         if (json) body["response_format"] = new { type = "json_object", schema=schema??DecisionSchema };

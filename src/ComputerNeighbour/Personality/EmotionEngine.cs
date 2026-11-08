@@ -39,10 +39,20 @@ public sealed class EmotionEngine
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly string _path;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly bool _inMemory;
     private EmotionState _state = new();
     private bool _initialized;
 
     public EmotionEngine(string root) => _path = Path.Combine(Path.GetFullPath(root), "data", "personality", "emotions.json");
+    private EmotionEngine(EmotionEngine source, NeedLevels levels)
+    {
+        if (!source._initialized) throw new InvalidOperationException("Initialize personality before forking it.");
+        _path = source._path;
+        _state = source.State with { Needs = levels };
+        _initialized = true;
+        _inMemory = true;
+    }
+    internal EmotionEngine ForkInMemory(NeedLevels levels) => new(this, levels);
     public EmotionState State => Volatile.Read(ref _state);
     public string? RecoveryNotice { get; private set; }
 
@@ -181,6 +191,7 @@ public sealed class EmotionEngine
 
     private async Task SaveAsync(EmotionState state, CancellationToken cancellationToken)
     {
+        if (_inMemory) { cancellationToken.ThrowIfCancellationRequested(); return; }
         var temporary = _path + ".tmp";
         try
         {

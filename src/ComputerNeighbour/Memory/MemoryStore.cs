@@ -36,6 +36,7 @@ public sealed class MemoryStore
     private readonly MemoryOptions _options;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _compactionGate = new(1, 1);
+    private readonly bool _inMemory;
     private MemoryState _state = new();
     private bool _initialized;
 
@@ -53,6 +54,21 @@ public sealed class MemoryStore
         _statePath = Path.Combine(_directory, "state.json");
         _journalPath = Path.Combine(_directory, "journal.jsonl");
     }
+
+    private MemoryStore(MemoryStore source)
+    {
+        source.EnsureInitialized();
+        _options = source._options;
+        _directory = source._directory;
+        _statePath = source._statePath;
+        _journalPath = source._journalPath;
+        // Published snapshots are replaced, never edited in place.
+        _state = Volatile.Read(ref source._state);
+        _initialized = true;
+        _inMemory = true;
+    }
+
+    internal MemoryStore ForkInMemory() => new(this);
 
     /// <summary>Bounded model input. Older uncompressed entries remain in the authoritative snapshot.</summary>
     public IReadOnlyList<MemoryEntry> Recent
@@ -250,8 +266,9 @@ public sealed class MemoryStore
             var next = new MemoryState { Generation = Guid.NewGuid().ToString("N") };
             await SaveStateAsync(next, cancellationToken);
             Volatile.Write(ref _state, next);
-            foreach (var path in new[] { _statePath + ".bak", _statePath + ".corrupt", _journalPath, _journalPath + ".1" })
-                if (File.Exists(path)) File.Delete(path);
+            if (!_inMemory)
+                foreach (var path in new[] { _statePath + ".bak", _statePath + ".corrupt", _journalPath, _journalPath + ".1" })
+                    if (File.Exists(path)) File.Delete(path);
             RecoveryNotice = null;
         }
         finally { _gate.Release(); }
@@ -279,6 +296,7 @@ public sealed class MemoryStore
 
     private async Task SaveStateAsync(MemoryState state, CancellationToken cancellationToken)
     {
+        if (_inMemory) { cancellationToken.ThrowIfCancellationRequested(); return; }
         var temporary = _statePath + ".tmp";
         try
         {
@@ -297,6 +315,7 @@ public sealed class MemoryStore
 
     private async Task AppendJournalAsync(MemoryEntry entry, CancellationToken cancellationToken)
     {
+        if (_inMemory) return;
         var line = JsonSerializer.Serialize(entry, JournalJson) + Environment.NewLine;
         var lineBytes = Encoding.UTF8.GetByteCount(line);
         if (lineBytes > _options.MaxJournalBytes) return;

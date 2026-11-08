@@ -9,9 +9,9 @@ public sealed partial class CompanionEngine
     private bool? desktopInputOverride;
     private bool delegateNextWork;
 
-    private bool WorkDesktopEnabled => desktopInputOverride ?? config.Permissions.DesktopInput;
+    private bool WorkDesktopEnabled => !IsIncognito && (desktopInputOverride ?? config.Permissions.DesktopInput);
 
-    internal string AccessStatus =>
+    internal string AccessStatus => IsIncognito ? IncognitoAccessMessage :
         $"Computer access — {accessMode.ToString().ToLowerInvariant()}; guided desktop input {(WorkDesktopEnabled ? "enabled" : "disabled")}; " +
         $"one-task approval {(delegateNextWork ? "armed" : "off")}.";
 
@@ -23,7 +23,13 @@ public sealed partial class CompanionEngine
 
     internal async Task<bool> TryHandleAccessCommandAsync(string text, CancellationToken ct)
     {
-        switch (AccessCommand(text))
+        var command=AccessCommand(text);
+        if(IsIncognito && command is ("/full access" or "/desktop on" or "/approve for me"))
+        {
+            ui.Write(IncognitoAccessMessage);
+            return true;
+        }
+        switch (command)
         {
             case "/access":
                 ui.Write(AccessStatus);

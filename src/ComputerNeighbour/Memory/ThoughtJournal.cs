@@ -23,12 +23,17 @@ internal sealed class ThoughtJournal(PortablePaths paths)
 {
     private const string FileName="data/memory/thoughts.json";
     private const int Limit=80;
+    private List<ThoughtNote>? InMemoryNotes { get; init; }
+
+    internal async Task<ThoughtJournal> ForkInMemoryAsync(CancellationToken ct) =>
+        new(paths) { InMemoryNotes = await ReadAsync(ct) };
 
     public async Task AppendAsync(ThoughtNote note)
     {
         var notes=await ReadAsync(CancellationToken.None);
         notes.Add(note);
         if(notes.Count>Limit)notes.RemoveRange(0,notes.Count-Limit);
+        if(InMemoryNotes is not null)return;
         var file=paths.Inside(FileName);
         var temporary=paths.Inside(FileName+".tmp");
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
@@ -54,17 +59,20 @@ internal sealed class ThoughtJournal(PortablePaths paths)
             lines.AddRange((note.Checks??[]).Select(check=>"- "+check));
             return string.Join("\n",lines);
         });
-        return "Recent turn notes\n\n"+string.Join("\n\n",entries)+"\n\nFile: "+paths.Inside(FileName);
+        return "Recent turn notes\n\n"+string.Join("\n\n",entries)+
+            (InMemoryNotes is null?"\n\nFile: "+paths.Inside(FileName):"\n\nIncognito turn notes in memory.");
     }
 
     public void Clear()
     {
+        if(InMemoryNotes is not null){InMemoryNotes.Clear();return;}
         File.Delete(paths.Inside(FileName));
         File.Delete(paths.Inside(FileName+".tmp"));
     }
 
     private async Task<List<ThoughtNote>> ReadAsync(CancellationToken ct)
     {
+        if(InMemoryNotes is not null)return InMemoryNotes;
         var file=paths.Inside(FileName);
         if(!File.Exists(file))return [];
         if(new FileInfo(file).Length>1_000_000)throw new InvalidDataException("The turn journal exceeds its size limit.");

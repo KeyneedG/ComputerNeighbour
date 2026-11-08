@@ -55,6 +55,12 @@ public sealed class AudioService : IAsyncDisposable
 
     public void EnrollSpeaker(string id) => speakers.EnrollNext(id);
 
+    internal async Task WaitForInputIdleAsync(CancellationToken ct)
+    {
+        await listenGate.WaitAsync(ct);
+        listenGate.Release();
+    }
+
     public string DescribeDevices()
     {
         if (!OperatingSystem.IsWindows()) return "Native audio requires Windows.";
