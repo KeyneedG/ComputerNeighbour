@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using ComputerNeighbour.Configuration;
+using ComputerNeighbour.Inference;
 using ComputerNeighbour.Platform;
 using ComputerNeighbour.Tools;
 
@@ -33,6 +34,40 @@ internal static class BehaviorTests
             Check.Throws<InvalidDataException>(() => intervals.Validate(paths));
             var quiet = new AppConfig(); quiet.Proactive.QuietStartHour = -1;
             Check.Throws<InvalidDataException>(() => quiet.Validate(paths));
+        });
+        await suite.Case("abliteration installation selects both checkpoints and supports reverting", root =>
+        {
+            var paths = new PortablePaths(root);
+            var config = AppConfig.Load(paths);
+            Check.Equal(config.Model.ModelFile, config.Model.EffectiveModelFile);
+
+            var marker = paths.Inside(ModelOptions.AbliterationMarker);
+            Directory.CreateDirectory(Path.GetDirectoryName(marker)!);
+            File.WriteAllText(marker, "");
+            var installed = AppConfig.Load(paths);
+            Check.Equal(ModelOptions.AmadeusModelFile, installed.Model.EffectiveModelFile);
+            Check.Equal(ModelOptions.AmadeusProjectorFile, installed.Model.EffectiveProjectorFile);
+
+            var executable = paths.Inside("runtimes/ollama/ollama.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(executable)!);
+            File.WriteAllText(executable, "");
+            var manifest = paths.Inside("runtimes/ollama/models/manifests/registry.ollama.ai/huihui_ai/qwen3.8-abliterated/27b");
+            Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
+            File.WriteAllText(manifest, "");
+            Check.True(OllamaDeepModel.IsInstalled(paths, installed.Model.UseAbliterated), "The abliterated specialist was not selected.");
+            Check.True(!OllamaDeepModel.IsInstalled(paths, false), "The stock profile tried to use the abliterated specialist.");
+            Check.Equal("huihui_ai/qwen3.8-abliterated:27b", OllamaDeepModel.ModelName(installed.Model.UseAbliterated));
+
+            var configFile = paths.Inside("config/appsettings.json");
+            config.Model.Abliterated = false;
+            File.WriteAllText(configFile, JsonSerializer.Serialize(config, AppConfig.Json));
+            var reverted = AppConfig.Load(paths).Model;
+            Check.Equal(config.Model.ModelFile, reverted.EffectiveModelFile);
+            Check.Equal(config.Model.ProjectorFile, reverted.EffectiveProjectorFile);
+            Check.Equal("qwen3.8:27b", OllamaDeepModel.ModelName(reverted.UseAbliterated));
+            config.Model.Abliterated = true;
+            config.Model.AutoStart = false;
+            Check.Throws<InvalidDataException>(() => config.Validate(paths));
         });
         await suite.Case("quiet hours support midnight crossing, daytime intervals and disabled intervals", _ =>
         {

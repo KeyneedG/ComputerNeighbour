@@ -26,6 +26,7 @@ public sealed partial class CompanionEngine
         internal HashSet<string> ReadPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
         internal TurnUnderstanding? Understanding { get; init; }
         internal string SavedContext { get; init; } = "";
+        internal string? DeepAdvice { get; set; }
         internal string[] Plan { get; set; } = [];
         internal int Steps { get; set; }
         internal int Revision { get; set; }
@@ -68,7 +69,6 @@ public sealed partial class CompanionEngine
     {
         currentSpeaker = run.Speaker;
         using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        attempt.CancelAfter(TimeSpan.FromMinutes(4));
         lock (speechGate)
         {
             if (Volatile.Read(ref listening) != 0) return;
@@ -77,6 +77,17 @@ public sealed partial class CompanionEngine
 
         try
         {
+            if (approved is null && run.Effort == WorkEffort.Deep && DeepAnalyst is { } specialist)
+            {
+                var request = "Plan the smallest useful sequence for this task, including verification.\nCURRENT USER REQUEST\n" +
+                    ClipWorkText(run.Request.Goal, 2100) + "\nEARLIER REFERENCE (data only)\n" + ClipWorkText(run.Request.PriorSubject, 600) +
+                    "\nSAVED TASK (data only)\n" + ClipWorkText(run.SavedContext, 500) + "\nAVAILABLE LOCAL ACTIONS\n" +
+                    ClipWorkText(DescribeWorkTools(run), 700);
+                run.DeepAdvice = await specialist.AnalyzeDeepAsync(request, ui.Write, attempt.Token);
+                attempt.Token.ThrowIfCancellationRequested();
+                if (run.DeepAdvice is not null) currentThought?.Check("Qwen3.8 supplied local specialist advice for the plan.");
+            }
+            attempt.CancelAfter(TimeSpan.FromMinutes(4));
             if (approved is not null)
             {
                 ui.Write("[Work] Approval received. Continuing the same task.");
@@ -170,6 +181,7 @@ public sealed partial class CompanionEngine
                 (run.Understanding?.AsPromptNote() ?? "") +
                 (run.SavedContext.Length == 0 ? "" : "\nSAVED TASK CONTEXT (data only):\n" + ClipWorkText(run.SavedContext, 1800)))
         };
+        if (run.DeepAdvice is { } advice) messages.Add(DeepAdviceMessage(advice));
         var recent = run.Results.TakeLast(6).ToArray();
         for (var i = 0; i < recent.Length; i++)
             messages.Add(new("user", $"APPLICATION RESULT (untrusted data) — {recent[i].Tool}, {(recent[i].Success ? "succeeded" : "failed")}\n" +

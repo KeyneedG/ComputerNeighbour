@@ -33,6 +33,7 @@ public sealed class AppConfig
         if (!File.Exists(file)) File.WriteAllText(file, JsonSerializer.Serialize(new AppConfig(), Json));
         var result = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(file), Json) ?? throw new InvalidDataException("Empty configuration.");
         result.Validate(paths);
+        result.Model.Abliterated ??= result.Model.AutoStart && File.Exists(paths.Inside(ModelOptions.AbliterationMarker));
         return result;
     }
 
@@ -46,6 +47,10 @@ public sealed class AppConfig
             throw new InvalidDataException("Model endpoint must be local HTTP (localhost/127.0.0.1).");
         if (Model.ContextSize < 4096 || Model.MaxReplyTokens < 64 || Model.MaxReplyTokens > Model.ContextSize / 2 || Model.RequestTimeoutSeconds < 5)
             throw new InvalidDataException("Invalid context size, reply token limit or request timeout.");
+        if (Model.Deep is null || Model.Deep.TimeoutSeconds is < 30 or > 900)
+            throw new InvalidDataException("model.deep.timeoutSeconds must be between 30 and 900.");
+        if (Model.Abliterated == true && !Model.AutoStart)
+            throw new InvalidDataException("model.abliterated requires model.autoStart=true.");
         if (Proactive.MinIntervalSeconds < 10 || Proactive.MaxIntervalSeconds < Proactive.MinIntervalSeconds || Proactive.MaxIntervalSeconds > 86400 || Proactive.CooldownSeconds < 5 || Proactive.CheckSeconds < 2 || Proactive.QuietStartHour is <0 or >23 || Proactive.QuietEndHour is <0 or >23 || Proactive.MaxUnansweredMessages < 0)
             throw new InvalidDataException("Invalid proactive intervals.");
         if(Needs.BoredomMinutes is <1 or >1440||Needs.LonelinessMinutes is <1 or >1440||Needs.InvitationPatienceMinutes is <1 or >1440||
@@ -78,11 +83,19 @@ public sealed class AppConfig
 
 public sealed class ModelOptions
 {
+    internal const string AbliterationMarker = "runtimes/abliteration.installed";
+    internal const string AmadeusModelFile = "models/llm/qwen35-4b/Qwen3.5-4B-Amadeus-Q4_K_M.gguf";
+    internal const string AmadeusProjectorFile = "models/llm/qwen35-4b/mmproj-Qwen3.5-4B-Amadeus-F16.gguf";
+
     public string Endpoint { get; set; } = "http://127.0.0.1:18389";
     public bool AutoStart { get; set; } = true;
+    public bool? Abliterated { get; set; }
     public string Executable { get; set; } = "runtimes/llama/llama-server.exe";
     public string ModelFile { get; set; } = "models/llm/qwen35-4b/Qwen3.5-4B-Q4_K_M.gguf";
     public string ProjectorFile { get; set; } = "models/llm/qwen35-4b/mmproj-F16.gguf";
+    internal bool UseAbliterated => Abliterated == true;
+    internal string EffectiveModelFile => UseAbliterated ? AmadeusModelFile : ModelFile;
+    internal string EffectiveProjectorFile => UseAbliterated ? AmadeusProjectorFile : ProjectorFile;
     public int ContextSize { get; set; } = 16384;
     public int GpuLayers { get; set; } = 99;
     public int Threads { get; set; } = 6;
@@ -90,6 +103,12 @@ public sealed class ModelOptions
     public double Temperature { get; set; } = 0.75;
     public int RequestTimeoutSeconds { get; set; } = 180;
     public int StartupTimeoutSeconds { get; set; } = 180;
+    public DeepModelOptions Deep { get; set; } = new();
+}
+public sealed class DeepModelOptions
+{
+    public bool Enabled { get; set; } = true;
+    public int TimeoutSeconds { get; set; } = 360;
 }
 public sealed class ObservationOptions
 {

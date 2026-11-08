@@ -141,12 +141,58 @@ internal static class EngineTests
             Check.True(!Directory.Exists(Path.Combine(root, "data", "tmp", "audio")), "Speech playback created a temporary audio directory.");
         });
 
+        await suite.Case("LoRA lessons require explicit owner dialogue and stay out of incognito", async root =>
+        {
+            var dialogue = new ScriptedModel("Sketches make a good starting point.", Decision(speak:false),
+                "That is a different story.", Decision(speak:false), "Here is an experimental thought.", Decision(speak:false));
+            await using var f = await Fixture.CreateAsync(root, dialogue);
+            var paths = new PortablePaths(root);
+            await using var local = new LocalModel(paths, f.Config.Model);
+            await using var learning = new DialogueLearning(paths, f.Config, local, f.Output);
+            static ValueTask NoTraining(CancellationToken _) => throw new InvalidOperationException("Unexpected training run.");
+
+            const string prompt = "I like starting with rough sketches.";
+            var examplesPath = paths.Inside("data/lora/examples.json");
+            await f.Engine.RespondAsync(prompt, "user", false, false, default);
+            Check.True(!File.Exists(examplesPath), "An unmarked exchange was copied into the training set.");
+            await learning.HandleAsync("good", f.Engine, NoTraining, default);
+            const string corrected = "I like seeing an idea while it is still taking shape.";
+            await learning.HandleAsync("teach " + corrected, f.Engine, NoTraining, default);
+            var before = await File.ReadAllTextAsync(examplesPath);
+            var examples = JsonSerializer.Deserialize<DialogueExample[]>(before, AppConfig.Json)!;
+            Check.Equal(new DialogueExample(prompt, corrected), examples.Single());
+            await Check.ThrowsAsync<InvalidOperationException>(() => learning.HandleAsync("train", f.Engine, NoTraining, default));
+
+            await f.Engine.RespondAsync("Here is a guest's example.", "guest", false, false, default);
+            await Check.ThrowsAsync<InvalidOperationException>(() => learning.HandleAsync("good", f.Engine, NoTraining, default));
+            var candidates = new[] { paths.Inside("data/lora/candidate.gguf"), paths.Inside("data/lora/amadeus/candidate.gguf") };
+            foreach (var candidate in candidates)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(candidate)!);
+                File.WriteAllText(candidate, "test fixture");
+            }
+            await using var sessions = new CompanionSession(f.Engine, f.Output);
+            await sessions.TryHandleCommandAsync("/start incognito", default);
+            var incognito = sessions.Current.Engine;
+            await incognito.RespondAsync("Here is an experimental remark.", "user", false, false, default);
+            await learning.HandleAsync("teach An experimental answer.", incognito, NoTraining, default);
+            await learning.HandleAsync("clear CONFIRM", incognito, NoTraining, default);
+            await sessions.TryHandleCommandAsync("/stop incognito", default);
+            Check.Equal(before, await File.ReadAllTextAsync(examplesPath));
+            Check.True(candidates.All(File.Exists), "Clearing training data in incognito deleted a saved adapter.");
+            await learning.HandleAsync("clear CONFIRM", f.Engine, NoTraining, default);
+            Check.True(!candidates.Any(File.Exists), "Clearing training data retained an adapter from one of the model profiles.");
+            Check.True(!File.Exists(examplesPath) && f.Memory.Recent.Any(entry => entry.Text == prompt),
+                "Clearing training data should leave the separate conversation memory available.");
+        });
+
         await suite.Case("the first pass selects quick, standard and deep dialogue without granting tools", async root =>
         {
+            const string advice = "Keep the crash recovery requirement separate from concurrency.";
             var model = new WorkflowModel(
                 [Routing("chat", "quick"), Routing("chat", "standard"), Routing("chat", "deep")],
                 "Hey there.", Decision(speak:false), "A cache helps when requests repeat.", Decision(speak:false),
-                "Separate concurrency from durability before choosing the queue.", Decision(speak:false));
+                "Separate concurrency from durability before choosing the queue.", Decision(speak:false)) { DeepAdvice = advice };
             await using var f = await Fixture.CreateAsync(root, model);
             await f.Engine.RespondAsync("Hi Evelyn.", "user", false, false, default);
             await f.Engine.RespondAsync("Why does a cache help?", "user", false, false, default);
@@ -154,6 +200,10 @@ internal static class EngineTests
             Check.True(model.Calls.Where(call => call.Purpose is not null).Select(call => call.Purpose).SequenceEqual(
                 new GenerationPurpose?[] { GenerationPurpose.Dialogue, GenerationPurpose.StandardDialogue, GenerationPurpose.DeepDialogue }),
                 "Effort from the first pass did not reach the actual dialogue calls.");
+            Check.True(model.DeepRequests.Single().Contains("different queue designs?"), "Only the deep turn should reach the specialist.");
+            var answer = model.Calls.Single(call => call.Purpose == GenerationPurpose.DeepDialogue).Messages;
+            Check.True(answer.Any(message => message.IsHistory && message.Text.Contains(advice)) && answer[^1].Text.Contains("different queue designs?"),
+                "The local reply lost the advisory result or the original user request.");
             Check.True(f.Output.Lines.All(line => !line.Contains("[Step")), "A deeper answer accidentally entered the action executor.");
         });
 
@@ -164,21 +214,46 @@ internal static class EngineTests
                 WorkStep("read_file", new { path = source }, plan: ["Read the input", "Save a summary", "Check the saved file"]),
                 WorkStep("create_file", new { path = output, content = "Verified summary" }),
                 WorkStep("read_file", new { path = output }),
-                WorkStep(reply: "I saved and checked the summary."));
+                WorkStep(reply: "I saved and checked the summary.")) { DeepAdvice = "Read the source before proposing a write, then verify the saved summary." };
             await using var f = await Fixture.CreateAsync(root, model);
             Directory.CreateDirectory(Path.Combine(root, "documents"));
             await File.WriteAllTextAsync(Path.Combine(root, source), "SOURCE_SENTINEL: Actual local content.");
             await f.Engine.RespondAsync("Прочитай documents/input.md и сохрани сводку в documents/summary.md.", "user", false, false, default);
             Check.Equal(2, model.Calls.Count);
+            Check.True(model.DeepRequests.Single().Contains(source) && model.Calls[0].Messages.Any(message =>
+                message.IsHistory && message.Text.Contains(model.DeepAdvice!)), "The work plan missed the specialist's advisory context.");
             Check.True(!File.Exists(Path.Combine(root, output)) && f.Output.Lines.Any(line => line.Contains("/approve 1")),
                 "The work loop ran the change before its approval.");
             Check.True(model.Calls[1].Messages.Any(m => m.Text.Contains("SOURCE_SENTINEL")), "The second step missed the first tool result.");
             await f.Engine.ApproveAsync(1, default);
+            Check.Equal(1, model.DeepRequests.Count, "Resuming a work task consulted the specialist again.");
             Check.Equal("Verified summary", await File.ReadAllTextAsync(Path.Combine(root, output)));
             Check.True(f.Output.Lines.Any(line => line.Contains("Verified the saved bytes.")), "The executor did not verify the committed file.");
             Check.True(model.Calls.All(call => call.Purpose == GenerationPurpose.DeepWorkStep) &&
                 model.Calls.Last().Messages.Any(m => m.Text.Contains("Verified summary")), "Resuming lost the workflow or its verification.");
             Check.True(f.Output.Lines.Last().Contains("saved and checked"), "The resumed workflow did not finish.");
+        });
+
+        await suite.Case("unavailable and incognito specialists fall back to the regular deep model", async root =>
+        {
+            var model = new WorkflowModel([Routing("chat", "deep"), Routing("chat", "deep")],
+                "Separate the possible causes first.", Decision(speak:false), "Check the observed pattern before deciding.", Decision(speak:false));
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Engine.RespondAsync("Help me reason through two possible causes.", "user", false, false, default);
+            await using var sessions = new CompanionSession(f.Engine, f.Output);
+            await sessions.TryHandleCommandAsync("/start incognito", default);
+            await sessions.Current.Engine.RespondAsync("Consider an experimental diagnosis.", "user", false, false, default);
+            Check.Equal(1, model.DeepRequests.Count);
+            Check.Equal(2, model.Calls.Count(call => call.Purpose == GenerationPurpose.DeepDialogue));
+        });
+
+        await suite.Case("Ollama advice keeps conclusions separate from thinking and rejects truncated output", _ =>
+        {
+            using var response = JsonDocument.Parse("""{"done":true,"done_reason":"stop","message":{"thinking":"private","content":"<think>draft</think>Check the backup."}}""");
+            Check.Equal("Check the backup.", OllamaDeepModel.ReadAnalysis(response.RootElement));
+            using var truncated = JsonDocument.Parse("""{"done":true,"done_reason":"length","message":{"content":"A partial answer"}}""");
+            Check.Throws<InvalidDataException>(() => OllamaDeepModel.ReadAnalysis(truncated.RootElement));
+            return Task.CompletedTask;
         });
 
         await suite.Case("delegation covers the paused workflow and expires before the next request", async root =>
@@ -815,10 +890,19 @@ internal static class EngineTests
     private static string WorkStep(string? tool = null, object? args = null, string reply = "", string[]? plan = null) =>
         JsonSerializer.Serialize(new { plan = plan ?? [], action = tool is null ? null : new { tool, args }, reply });
 
-    private sealed class WorkflowModel(string[] routes, params string[] responses) : IChatModel, ITurnContextModel
+    private sealed class WorkflowModel(string[] routes, params string[] responses) : IChatModel, ITurnContextModel, IDeepAnalysisModel
     {
         private int route;
         public List<(GenerationPurpose? Purpose, ChatMessage[] Messages)> Calls { get; } = [];
+        public List<string> DeepRequests { get; } = [];
+        public string? DeepAdvice { get; init; }
+
+        public Task<string?> AnalyzeDeepAsync(string request, Action<string> status, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            DeepRequests.Add(request);
+            return Task.FromResult(DeepAdvice);
+        }
 
         public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) => Task.FromResult(routes[route++]);
 

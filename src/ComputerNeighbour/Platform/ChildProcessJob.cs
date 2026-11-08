@@ -17,21 +17,28 @@ public static class ChildProcessJob
     /// Attach immediately after Process.Start, before awaiting child output. If a host policy
     /// prevents nested jobs, kill the just-started child and fail clearly instead of orphaning it.
     /// </summary>
-    public static void Attach(Process process)
+    public static void Attach(Process process) => Attach(process, scoped: false);
+
+    // The short-lived analysis server and its workers must release their memory before the chat model starts again.
+    internal static IDisposable AttachScoped(Process process) => Attach(process, scoped: true);
+
+    private static SafeJobHandle Attach(Process process, bool scoped)
     {
         ArgumentNullException.ThrowIfNull(process);
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Child process ownership requires Windows.");
+        SafeJobHandle? handle = null;
         try
         {
-            var handle = Job.Value;
-            if (AssignProcessToJobObject(handle, process.SafeHandle)) return;
+            handle = scoped ? CreateJob() : Job.Value;
+            if (AssignProcessToJobObject(handle, process.SafeHandle)) return handle;
             var error = Marshal.GetLastWin32Error();
             // A small utility can finish before assignment; there is no orphan to contain.
-            if (process.HasExited) return;
+            if (process.HasExited) return handle;
             throw new Win32Exception(error, "Windows denied child-process ownership. This host may prohibit nested job objects. Start ComputerNeighbour directly from a normal Windows console.");
         }
         catch
         {
+            if (scoped) handle?.Dispose();
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
             catch (Win32Exception) { }

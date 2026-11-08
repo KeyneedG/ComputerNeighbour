@@ -18,6 +18,7 @@ public sealed partial class CompanionEngine
 
     internal string DescribeStatus() =>
         $"Root: {paths.Root}\nSession: {(IsIncognito ? "incognito (temporary)" : "regular")}\n{emotions.Status}\n{NeedsStatus}\n{AccessStatus}\n" +
+        (model is LocalModel local ? $"Deep analysis: {(!IsIncognito && local.DeepReady ? local.DeepModelName + " available" : "regular model")}\n" : "") +
         $"Memory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={Paused}; mute={Muted}.";
 
     internal async Task<CompanionEngine> ForkIncognitoAsync(CancellationToken ct)

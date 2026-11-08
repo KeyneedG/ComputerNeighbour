@@ -23,7 +23,7 @@ public interface ITurnContextModel
     Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>Task.FromResult<string?>(null);
 }
 
-public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, ITurnContextModel, IAsyncDisposable
+public sealed class LocalModel(PortablePaths paths, ModelOptions options, CancellationToken stopping = default) : IChatModel, ITurnContextModel, IDeepAnalysisModel, IAsyncDisposable
 {
     private static readonly JsonElement ContextSchema=JsonSerializer.Deserialize<JsonElement>("""
     {"type":"object","additionalProperties":false,"required":["intent","request","uncertainty","evidence","effort"],"properties":{
@@ -84,6 +84,8 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     private readonly HttpClient client = new() { BaseAddress = new Uri(options.Endpoint.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(options.RequestTimeoutSeconds) };
     private Process? process;
     private Task? drainTask;
+    private bool cpuOnly;
+    internal string? LoadedAdapter { get; private set; }
     private int incognito;
     private int suppressRuntimeLogs;
 
@@ -93,26 +95,122 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         if (active) Volatile.Write(ref suppressRuntimeLogs, 1);
         Volatile.Write(ref incognito, active ? 1 : 0);
     }
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct) => StartAsync(null, false, ct);
+
+    internal async Task StartAsync(string? adapter, bool useCpu, CancellationToken ct)
     {
         if (!options.AutoStart) { await WaitReadyAsync(ct); return; }
         if (await HealthyAsync(ct)) throw new IOException("Model port is already occupied. Stop the existing server, use another endpoint, or explicitly set model.autoStart=false.");
-        foreach (var file in new[] { options.Executable, options.ModelFile, options.ProjectorFile })
-            if (!File.Exists(paths.Inside(file))) throw new FileNotFoundException("Local dependency missing. Run Setup.cmd first.", file);
+        var modelPath = paths.Inside(options.EffectiveModelFile);
+        var projectorPath = paths.Inside(options.EffectiveProjectorFile);
+        foreach (var file in new[] { paths.Inside(options.Executable), modelPath, projectorPath })
+            if (!File.Exists(file)) throw new FileNotFoundException(
+                $"Local dependency missing: {Path.GetFileName(file)}. Run Setup.cmd or Setup.cmd -Only Abliteration for the abliterated weights.", file);
         var info = new ProcessStartInfo(paths.Inside(options.Executable)) { WorkingDirectory = paths.Root, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         var endpoint = new Uri(options.Endpoint);
-        string[] arguments = ["--model", paths.Inside(options.ModelFile), "--mmproj", paths.Inside(options.ProjectorFile), "--host", "127.0.0.1", "--port", endpoint.Port.ToString(), "--ctx-size", options.ContextSize.ToString(), "--n-gpu-layers", options.GpuLayers.ToString(), "--threads", options.Threads.ToString(), "--parallel", "1", "--batch-size", "512", "--ubatch-size", "128", "--image-max-tokens", "1024", "--no-webui", "--offline", "--jinja", "--alias", "neighbour"];
+        string[] arguments = ["--model", modelPath, "--mmproj", projectorPath, "--host", "127.0.0.1", "--port", endpoint.Port.ToString(), "--ctx-size", options.ContextSize.ToString(), "--n-gpu-layers", (useCpu ? 0 : options.GpuLayers).ToString(), "--threads", options.Threads.ToString(), "--parallel", "1", "--batch-size", "512", "--ubatch-size", "128", "--image-max-tokens", "1024", "--no-webui", "--offline", "--jinja", "--alias", "neighbour"];
         foreach (var argument in arguments) info.ArgumentList.Add(argument);
         foreach (var argument in new[] { "--poll", "0", "--poll-batch", "0", "--image-min-tokens", "1024", "--cache-ram", "0", "--cors-origins", "http://127.0.0.1", "--reasoning-format", "deepseek" }) info.ArgumentList.Add(argument);
+        if (useCpu)
+            foreach (var argument in new[] { "--device", "none", "--no-mmproj-offload", "--no-op-offload" }) info.ArgumentList.Add(argument);
+        if (adapter is not null)
+        {
+            // The per-request scale is opt-in. The CLI uses ':' as its separator, so pass a root-relative path on Windows.
+            info.ArgumentList.Add("--lora-scaled");
+            info.ArgumentList.Add(Path.GetRelativePath(paths.Root, adapter) + ":0");
+        }
         process = Process.Start(info) ?? throw new IOException("Cannot start llama-server.");
         ChildProcessJob.Attach(process);
         drainTask = Task.WhenAll(DrainAsync(process.StandardOutput, "llama.stdout.log"), DrainAsync(process.StandardError, "llama.stderr.log"));
-        await WaitReadyAsync(ct);
+        try
+        {
+            await WaitReadyAsync(ct);
+            if (adapter is not null)
+            {
+                using var response = await client.GetAsync("lora-adapters", ct);
+                response.EnsureSuccessStatusCode();
+                using var loaded = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                if (loaded.RootElement.GetArrayLength() != 1 || loaded.RootElement[0].GetProperty("id").GetInt32() != 0 ||
+                    loaded.RootElement[0].GetProperty("scale").GetDouble() != 0 ||
+                    loaded.RootElement[0].GetProperty("path").GetString() is not { } registeredPath ||
+                    !string.Equals(Path.GetFullPath(registeredPath, paths.Root), adapter, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("llama-server did not register the requested LoRA adapter.");
+            }
+            LoadedAdapter = adapter;
+            cpuOnly = useCpu;
+        }
+        catch
+        {
+            await StopAsync();
+            throw;
+        }
+    }
+
+    internal async Task ReloadAsync(string? adapter, bool useCpu, CancellationToken ct)
+    {
+        if (!options.AutoStart) throw new InvalidOperationException("LoRA requires the llama-server started by ComputerNeighbour.");
+        if (process is { HasExited: false } && adapter == LoadedAdapter && useCpu == cpuOnly) return;
+        var previousAdapter = LoadedAdapter;
+        var previousCpu = cpuOnly;
+        await StopAsync();
+        try { await StartAsync(adapter, useCpu, ct); }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            await StartAsync(previousAdapter, previousCpu, ct);
+            throw;
+        }
+    }
+
+    internal string DeepModelName => OllamaDeepModel.ModelName(options.UseAbliterated);
+    internal bool DeepReady => !cpuOnly && options.Deep.Enabled && options.AutoStart && OllamaDeepModel.IsInstalled(paths, options.UseAbliterated);
+
+    async Task<string?> IDeepAnalysisModel.AnalyzeDeepAsync(string request, Action<string> status, CancellationToken ct)
+    {
+        if (Volatile.Read(ref incognito) != 0 || !DeepReady) return null;
+        ct.ThrowIfCancellationRequested();
+        var adapter = LoadedAdapter;
+        status($"[Deep] Consulting {DeepModelName} locally. This can take a few minutes. /cancel stops the request.");
+        try
+        {
+            await StopAsync();
+            var advice = await OllamaDeepModel.AnalyzeAsync(paths, options.UseAbliterated, request, options.Deep.TimeoutSeconds, ct);
+            status("[Deep] Qwen3.8 analysis ready. Returning to the regular model.");
+            return advice;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            status("[Deep] Qwen3.8 reached its time limit. Continuing on the regular model.");
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or HttpRequestException or JsonException or
+            InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            status("[Deep] Qwen3.8 could not finish. Continuing on the regular model. " + ex.Message);
+            return null;
+        }
+        finally
+        {
+            if (!stopping.IsCancellationRequested)
+            {
+                try { await StartAsync(adapter, false, stopping); }
+                catch (Exception ex) when (!stopping.IsCancellationRequested && options.GpuLayers != 0 &&
+                    ex is (IOException or HttpRequestException or OperationCanceledException))
+                {
+                    status("[Deep] Restoring the regular model on the CPU.");
+                    await StartAsync(adapter, true, stopping);
+                }
+            }
+        }
     }
     private async Task DrainAsync(StreamReader reader, string filename)
     {
         try
         {
+            if (Volatile.Read(ref suppressRuntimeLogs) != 0)
+            {
+                while (await reader.ReadLineAsync() is not null) { }
+                return;
+            }
             var file = paths.Inside("data/logs/" + filename);
             if (File.Exists(file) && new FileInfo(file).Length > 2_000_000) File.Move(file, file + ".previous", true);
             await using var writer = new StreamWriter(file, append: true) { AutoFlush = true };
@@ -140,25 +238,28 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         }
     }
     public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct)=>RequestAsync(messages,json,json?0.25:0.25,false,ct);
-    public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>purpose switch
+    public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>CompleteAsync(messages,purpose,ct,false);
+    internal Task<string> CompletePersonalDialogueAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct)=>CompleteAsync(messages,purpose,ct,true);
+    private Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages,GenerationPurpose purpose,CancellationToken ct,bool useAdapter)=>purpose switch
     {
         GenerationPurpose.Sketch => RequestAsync(messages,true,.65,false,ct,SketchSchema,1350),
         GenerationPurpose.WorkTask => RequestAsync(messages,true,0,false,ct,WorkTaskSchema,1000),
-        GenerationPurpose.StandardDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(1200,options.MaxReplyTokens+240),thinkingBudget:192),
-        GenerationPurpose.DeepDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(2000,options.MaxReplyTokens+800),thinkingBudget:640),
+        GenerationPurpose.StandardDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(1200,options.MaxReplyTokens+240),thinkingBudget:192,useAdapter:useAdapter),
+        GenerationPurpose.DeepDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(2000,options.MaxReplyTokens+800),thinkingBudget:640,useAdapter:useAdapter),
         GenerationPurpose.WorkStep => RequestAsync(messages,true,.15,false,ct,WorkStepSchema,1000),
         GenerationPurpose.DeepWorkStep => RequestAsync(messages,true,.15,false,ct,WorkStepSchema,1700,thinkingBudget:640),
-        _ => RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct)
+        _ => RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct,useAdapter:useAdapter)
     };
     public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,360);
     public async Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>
         await RequestAsync(messages,true,0,false,ct,SpeechSchemas[sentenceCount-1],140);
-    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null,int thinkingBudget=0)
+    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null,int thinkingBudget=0,bool useAdapter=false)
     {
         messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);
         var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:image/png;base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
         var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = maxTokens??(json||dialogue ? options.MaxReplyTokens : 1800), ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = thinkingBudget>0 } };
         if(Volatile.Read(ref incognito)!=0)body["cache_prompt"]=false;
+        if(dialogue&&useAdapter&&LoadedAdapter is not null)body["lora"]=new[] {new {id=0,scale=1.0}};
         if(thinkingBudget>0)body["thinking_budget_tokens"]=thinkingBudget;
         if(dialogue){body["repeat_penalty"]=1.1;body["repeat_last_n"]=256;body["top_p"]=0.9;}
         if (json) body["response_format"] = new { type = "json_object", schema=schema??DecisionSchema };
@@ -201,10 +302,23 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         }
         throw new InvalidDataException("Unable to fit the conversation into the model context.");
     }
+    private async Task StopAsync()
+    {
+        if (process is null) return;
+        using (process)
+        {
+            try { if (!process.HasExited) process.Kill(true); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) when (process.HasExited) { }
+            await process.WaitForExitAsync();
+            if (drainTask is not null) await drainTask;
+        }
+        process = null;
+        drainTask = null;
+    }
     public async ValueTask DisposeAsync()
     {
-        if (process is not null) { try { if (!process.HasExited) process.Kill(true); await process.WaitForExitAsync(); } catch (InvalidOperationException) { } process.Dispose(); }
-        if (drainTask is not null) await drainTask;
-        client.Dispose();
+        try { await StopAsync(); }
+        finally { client.Dispose(); }
     }
 }

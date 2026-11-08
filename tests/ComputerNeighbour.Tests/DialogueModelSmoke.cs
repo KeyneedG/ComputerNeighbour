@@ -52,8 +52,8 @@ internal static class DialogueModelSmoke
         try
         {
             var options=AppConfig.Load(portable).Model;
-            report.ModelFile=options.ModelFile;
-            report.ProjectorFile=options.ProjectorFile;
+            report.ModelFile=options.EffectiveModelFile;
+            report.ProjectorFile=options.EffectiveProjectorFile;
             var listener=new TcpListener(IPAddress.Loopback,0);listener.Start();
             var port=((IPEndPoint)listener.LocalEndpoint).Port;listener.Stop();
             options.Endpoint="http://127.0.0.1:"+port;options.AutoStart=true;

@@ -77,6 +77,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     public int UnansweredMessages { get; private set; }
     public bool Paused { get; set; }
     public bool Muted { get; set; }
+    internal DialogueExample? LastDialogueExample { get; private set; }
     public bool CanInitiate=>hasUserInteracted||!config.Proactive.RequireFirstUserMessage;
     public int InitiativeIntervalScale=>profile.Preferences.ReducedInitiative?3:1;
     public bool WaitingForCompanyReply=>needs.WaitingForReply;
@@ -103,6 +104,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         lastTurnWasWorkTask=false;
         lastScreenObservation=null;
         lastResearch=null;
+        LastDialogueExample=null;
     }
     public Task<string> GetThoughtsAsync(CancellationToken ct)=>thoughtJournal.FormatAsync(ct);
     private async Task InitializeProfileAsync(CancellationToken ct)
@@ -228,6 +230,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
 
     public async Task RespondAsync(string input,string speaker,bool proactive,bool forceScreen,CancellationToken ct)
     {
+        if(!proactive)LastDialogueExample=null;
         var note=config.TurnProcessing.KeepThoughtJournal
             ?new ThoughtNote{Route=proactive?"autonomous":"conversation"}:null;
         currentThought=note;
@@ -790,12 +793,17 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         var dialogue=ConversationContext.Build(system,memory.Recent,image,input,spokenReply);
         var previous=memory.Recent.LastOrDefault(e=>e.Role=="assistant")?.Text??"";
         var asksName=IsMainSpeaker(currentSpeaker)&&ReplyQuality.IsNameQuestion(input)&&profile.PreferredName.Length>0;
+        var personalDialogue=image is null&&currentSpeaker!="system-event"&&IsMainSpeaker(currentSpeaker);
+        if (effort == WorkEffort.Deep && personalDialogue && !await AddDeepDialogueAdviceAsync(input, dialogue, ct)) return;
         if(asksName)dialogue[0]=dialogue[0] with {Text=dialogue[0].Text+"\nFor this factual request, the USER'S stored preferred name is "+profile.PreferredName+". Answer that fact directly. This is not a request to name yourself."};
         string? answer=null;
         for(var attempt=0;attempt<3;attempt++)
         {
             string candidate;
-            try{candidate=(await model.CompleteAsync(dialogue,DialoguePurpose(attempt==0?effort:WorkEffort.Quick),ct)).Trim();}
+            var purpose=DialoguePurpose(attempt==0?effort:WorkEffort.Quick);
+            try{candidate=(await (personalDialogue&&model is LocalModel local
+                ?local.CompletePersonalDialogueAsync(dialogue,purpose,ct)
+                :model.CompleteAsync(dialogue,purpose,ct))).Trim();}
             catch(Exception ex) when(attempt==0&&effort!=WorkEffort.Quick&&(ex is InvalidDataException or HttpRequestException||ex is OperationCanceledException&&!ct.IsCancellationRequested))
             {currentThought?.Check("The deeper pass was unavailable; I retried with the ordinary model pass.");continue;}
             var confused=ReplyQuality.HasIdentityConfusion(candidate,config.CharacterName,profile.PreferredName);
@@ -813,6 +821,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         if(answer is null){await DeliverReplyAsync("I didn't get a clear answer to that. Could you rephrase it?",false,ct);return;}
         if(image is not null)lastScreenObservation=new(lastScreen,answer[..Math.Min(answer.Length,1500)]);
         await DeliverReplyAsync(answer,false,ct);
+        if(personalDialogue&&!IsIncognito)LastDialogueExample=new(input,answer);
         try
         {
             const string maintenanceRules="""

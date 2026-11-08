@@ -1,11 +1,23 @@
 ﻿param(
     [ValidateSet('vulkan','cpu')][string]$Backend = 'vulkan',
-    [ValidateSet('All','Runtimes','Models','Llama','Whisper','Piper','Qwen-TTS')][string]$Only = 'All',
+    [ValidateSet('All','Runtimes','Models','Llama','Whisper','Piper','Qwen-TTS','LoRA','Qwen3.8','Abliteration')][string]$Only = 'All',
     [switch]$SkipModels,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$Abliterated
 )
 . (Join-Path $PSScriptRoot 'Portable.Common.ps1')
 Initialize-PortableEnvironment
+if ($Only -eq 'LoRA') { & (Join-Path $PSScriptRoot 'Setup-Lora.ps1') -Abliterated:$Abliterated; return }
+if ($Only -eq 'Abliteration') {
+    & (Join-Path $PSScriptRoot 'Setup-Abliteration.ps1') -SkipModels:$SkipModels
+    if (-not $SkipBuild) { & (Join-Path $PSScriptRoot 'Build.ps1') }
+    return
+}
+if ($Only -eq 'Qwen3.8') {
+    & (Join-Path $PSScriptRoot 'Setup-Deep.ps1') -SkipModels:$SkipModels
+    if (-not $SkipBuild) { & (Join-Path $PSScriptRoot 'Build.ps1') }
+    return
+}
 $manifestPath = Get-PortablePath 'models/dependencies.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $lockPath = Get-PortablePath 'models/installed-lock.json'

@@ -70,10 +70,11 @@ public static class Program
             if(args.Contains("--diagnose")) { Diagnose(paths,config,audio,ui);return 0; }
             var memory=new MemoryStore(paths.Root,config.Memory);await memory.InitializeAsync(shutdown.Token);
             var emotions=new EmotionEngine(paths.Root);await emotions.InitializeAsync(shutdown.Token);
-            await using var model=new LocalModel(paths,config.Model);
+            await using var model=new LocalModel(paths,config.Model,shutdown.Token);
+            await using var learning=new DialogueLearning(paths,config,model,ui);
             var version=typeof(Program).Assembly.GetName().Version?.ToString(3)??"0.2.0";
-            ui.Write($"ComputerNeighbour {version} · {config.CharacterName}\nModel: {Path.GetFileName(config.Model.ModelFile)}\nStarting local model; this may take a moment. /help for commands.");
-            await model.StartAsync(shutdown.Token);
+            ui.Write($"ComputerNeighbour {version} · {config.CharacterName}\nModel: {Path.GetFileName(config.Model.EffectiveModelFile)}\nStarting local model; this may take a moment. /help for commands.");
+            await learning.StartModelAsync(shutdown.Token);
             using var weather=new WeatherService(config);
             await using var regularEngine=new CompanionEngine(paths,config,model,memory,emotions,desktop,audio,ui,weather);
             await regularEngine.GetRelationshipAsync(shutdown.Token);
@@ -93,8 +94,21 @@ public static class Program
                     try
                     {
                         if(evt.Kind=="exit")break;
-                        if(evt.Kind=="text"&&await sessions.TryHandleCommandAsync(evt.Text,shutdown.Token))
+                        if(evt.Kind=="lora-done")
                         {
+                            await learning.FinishTrainingAsync(shutdown.Token);
+                            continue;
+                        }
+                        if(evt.Kind=="text"&&CompanionSession.IsIncognitoCommand(evt.Text))
+                        {
+                            if(evt.Text.Trim().Equals("/stop incognito",StringComparison.OrdinalIgnoreCase))
+                                await learning.EndPreviewAsync(shutdown.Token);
+                            else if(learning.IsTraining)
+                            {
+                                ui.Write("[LoRA] Wait for training to finish or use /lora cancel before entering incognito.");
+                                continue;
+                            }
+                            await sessions.TryHandleCommandAsync(evt.Text,shutdown.Token);
                             ui.SetIncognito(sessions.Current.Engine.IsIncognito);
                             continue;
                         }
@@ -109,6 +123,8 @@ public static class Program
                             {
                                 case "/exit":case "/quit": shutdown.Cancel();break;
                                 case "/help": ui.Write(Help);break;
+                                case "/lora": await learning.HandleAsync(arg,engine,
+                                    ct=>queue.Writer.WriteAsync(new("lora-done","","system-event"),ct),shutdown.Token);break;
                                 case "/status": ui.Write(engine.DescribeStatus());break;
                                 case "/pause": engine.Paused=true;engine.InterruptSpeech();ui.Write("Background observation and proactive comments paused. You can still ask me to look.");break;
                                 case "/resume": engine.Paused=false;ui.Write("Background observation and proactive comments resumed.");break;
@@ -132,7 +148,16 @@ public static class Program
                                 case "/write":case "/create": await engine.RespondAsync("write "+arg,"user",false,false,shutdown.Token);break;
                                 case "/edit": await engine.RespondAsync("edit "+arg,"user",false,false,shutdown.Token);break;
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
-                                case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory, saved tasks and their reminders, web sources and turn notes erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory and saved tasks.");break;
+                                case "/forget":
+                                    if(arg=="CONFIRM")
+                                    {
+                                        await engine.ForgetConversationAsync(shutdown.Token);
+                                        if(!engine.IsIncognito)await learning.ClearAsync(shutdown.Token);
+                                        ui.Write("Conversation memory, saved tasks and their reminders, web sources and turn notes erased. Character, profile, mood and relationship retained." +
+                                            (engine.IsIncognito?"":" LoRA examples and adapters cleared."));
+                                    }
+                                    else ui.Write("Type /forget CONFIRM to erase conversation memory, saved tasks and LoRA training data for the current session.");
+                                    break;
                                 case "/task":case "/tasks": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
                                 case "/work": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
                                 case "/look": await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
@@ -261,7 +286,7 @@ public static class Program
     private static void Diagnose(PortablePaths paths,AppConfig config,AudioService audio,ConsoleUi ui)
     {
         ui.Write("Portable root: "+paths.Root);
-        foreach(var path in new[]{config.Model.Executable,config.Model.ModelFile,config.Model.ProjectorFile,config.Audio.WhisperExecutable,config.Audio.WhisperModel,config.Audio.PiperExecutable,config.Audio.PiperModel,config.Audio.PiperModel+".json",config.CharacterFile})ui.Write($"{(File.Exists(paths.Inside(path))?"OK":"MISSING")} {path}");
+        foreach(var path in new[]{config.Model.Executable,config.Model.EffectiveModelFile,config.Model.EffectiveProjectorFile,config.Audio.WhisperExecutable,config.Audio.WhisperModel,config.Audio.PiperExecutable,config.Audio.PiperModel,config.Audio.PiperModel+".json",config.CharacterFile})ui.Write($"{(File.Exists(paths.Inside(path))?"OK":"MISSING")} {path}");
         ui.Write(config.Audio.UsesExpressiveVoice?$"Voice: Qwen3-TTS / {config.Audio.QwenTtsVoice} ({config.Audio.QwenTtsDevice})":"Voice: Piper");
         if(config.Audio.UsesExpressiveVoice)
             foreach(var path in new[]{config.Audio.QwenTtsExecutable,config.Audio.QwenTtsModel})
@@ -293,6 +318,7 @@ public static class Program
     /task          Show task commands for saving, resuming, and linking materials
     /start incognito  Start a temporary copy of the current session for experiments
     /stop incognito   Discard the temporary state and return to the regular session
+    /lora help        Show local training commands for approved dialogue examples
     /compact       Compact memory now with the model
     /forget CONFIRM Erase conversation memory and saved tasks
     /approve N     Approve a displayed computer action (expires in 2 minutes)
