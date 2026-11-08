@@ -118,6 +118,8 @@ public static class ReplyQuality
             @"(?:(?:open(?:ing)?|launch(?:ing)?|switch(?:ing)? to)" + appTarget +
             @"|(?:sav(?:e|ing)|writ(?:e|ing)|typ(?:e|ing)|edit(?:ing)?|creat(?:e|ing)|draw(?:ing)?|sketch(?:ing)?|click(?:ing)?|mov(?:e|ing)|press(?:ing)?)\b[^.!?\r\n]{0,100}\b" + computerTarget + @"\b)",
             ignoreCase) ||
+            Regex.IsMatch(answer, firstPerson + @"renam(?:e|ing)\b|\bI(?:['’]ve| have)?\s+(?:just |already )?renamed\b|" +
+                @"\bI can rename (?:them|it|(?:the|my) (?:entries|files|documents))\b", ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve| have)?\s+(?:(?:just|already|successfully)\s+)*(?:opened|launched|switched to)" + appTarget, ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve| have| did)?\s+(?:(?:just|already|successfully)\s+)*(?:(?:start(?:ed)?\s+(?:typing|writing|drawing|editing))|typed|wrote|drew|saved|edited)\b[^.!?\r\n]{0,80}\b" + computerTarget + @"\b", ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve got| have)\s+(?:the|my|a)\s+(?:drawing\s+)?brush ready\b|" +

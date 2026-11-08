@@ -9,13 +9,14 @@ using ComputerNeighbour.Platform;
 namespace ComputerNeighbour.Inference;
 
 public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
-public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep, RequestedSketch, SketchReview, WorkSearch, SketchRevision, SketchInspection, ScreenRelevance, PersonalThought }
+public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep, RequestedSketch, SketchReview, WorkSearch, SketchRevision, SketchInspection, ScreenRelevance, PersonalThought, PersonalOutline, PersonalScene, PersonalReview }
 public interface IChatModel
 {
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct);
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,
         purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.RequestedSketch or GenerationPurpose.SketchReview or GenerationPurpose.SketchRevision or GenerationPurpose.WorkTask
-            or GenerationPurpose.WorkStep or GenerationPurpose.DeepWorkStep or GenerationPurpose.ScreenRelevance,ct);
+            or GenerationPurpose.WorkStep or GenerationPurpose.DeepWorkStep or GenerationPurpose.ScreenRelevance
+            or GenerationPurpose.PersonalOutline or GenerationPurpose.PersonalReview,ct);
 }
 
 public interface ITurnContextModel
@@ -38,6 +39,18 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
     """);
     private static readonly JsonElement ScreenRelevanceSchema=JsonSerializer.Deserialize<JsonElement>(
         """{"type":"object","additionalProperties":false,"required":["relevant"],"properties":{"relevant":{"type":"boolean"}}}""");
+    private static readonly JsonElement PersonalOutlineSchema=JsonSerializer.Deserialize<JsonElement>("""
+        {"type":"object","additionalProperties":false,"required":["title","aim","scenes"],"properties":{
+          "title":{"type":"string","maxLength":80},"aim":{"type":"string","maxLength":500},
+          "scenes":{"type":"array","minItems":3,"maxItems":3,"items":{"type":"string","maxLength":600}}
+        }}
+        """);
+    private static readonly JsonElement PersonalReviewSchema=JsonSerializer.Deserialize<JsonElement>("""
+        {"type":"object","additionalProperties":false,"required":["decision","feedback","scene"],"properties":{
+          "decision":{"type":"string","enum":["accept","revise","research","defer","keep"]},
+          "feedback":{"type":"string","maxLength":500},"scene":{"type":"integer","minimum":0,"maximum":3}
+        }}
+        """);
     private static readonly JsonElement[] SpeechSchemas=Enumerable.Range(1,SpeechDelivery.MaxDirectedSentences)
         .Select(count=>JsonSerializer.SerializeToElement(new
         {
@@ -265,6 +278,9 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
         GenerationPurpose.SketchReview => RequestAsync(messages,true,0,false,ct,SketchReviewSchema,240),
         GenerationPurpose.WorkSearch => RequestAsync(messages,false,0,false,ct,maxTokens:100),
         GenerationPurpose.PersonalThought => RequestAsync(messages,false,.58,false,ct,maxTokens:480),
+        GenerationPurpose.PersonalOutline => RequestAsync(messages,true,.64,false,ct,PersonalOutlineSchema,650),
+        GenerationPurpose.PersonalScene => RequestAsync(messages,false,.66,false,ct,maxTokens:640),
+        GenerationPurpose.PersonalReview => RequestAsync(messages,true,.20,false,ct,PersonalReviewSchema,260),
         GenerationPurpose.ScreenRelevance => RequestAsync(messages,true,0,false,ct,ScreenRelevanceSchema,48),
         GenerationPurpose.WorkTask => RequestAsync(messages,true,0,false,ct,WorkTaskSchema,1000),
         GenerationPurpose.StandardDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(1200,options.MaxReplyTokens+240),thinkingBudget:192,useAdapter:useAdapter),

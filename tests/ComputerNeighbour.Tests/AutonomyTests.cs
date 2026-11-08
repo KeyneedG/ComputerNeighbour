@@ -25,17 +25,22 @@ internal static class AutonomyTests
             Check.Equal<PersonalGoal?>(PersonalGoal.Company, AutonomyPlanner.Choose(lonely, null,
                 goal => goal != PersonalGoal.Train && goal != PersonalGoal.Recover, () => 0));
             var google = AutonomyPlanner.Plan(PersonalGoal.Company, 0, lonely, _ => true);
-            Check.Equal("AskGoogle,Reflect", string.Join(',', google));
+            Check.Equal("Plan,AskGoogle,Reflect,Review,SaveNote", string.Join(',', google));
             var fallback = AutonomyPlanner.Plan(PersonalGoal.Company, PersonalFact.FoundSource, lonely,
                 action => action != PersonalAction.AskGoogle);
-            Check.Equal("ReadArticle,Reflect", string.Join(',', fallback));
+            Check.Equal("Plan,ReadArticle,Reflect,Review,SaveNote", string.Join(',', fallback));
+            var inspired = new NeedLevels { Inspiration = 1, Energy = 1, Playfulness = 1 };
+            Check.Equal<PersonalGoal?>(PersonalGoal.Explore, AutonomyPlanner.Choose(inspired, PersonalGoal.Read,
+                goal => goal is PersonalGoal.Explore or PersonalGoal.Write, () => 0,
+                [PersonalGoal.Write, PersonalGoal.Practice, PersonalGoal.Read]));
         });
 
         await suite.Case("an interrupted personal lookup preserves its goal across restart and keeps its diary separate", async root =>
         {
             var now = DateTimeOffset.UtcNow;
             var paths = new PortablePaths(root);
-            var goal = new PersonalGoalState(PersonalGoal.Explore, Guid.NewGuid(), now, "Cyanotypes");
+            var goal = new PersonalGoalState(PersonalGoal.Explore, Guid.NewGuid(), now, "Cyanotypes")
+                { Facts = PersonalFact.Planned };
             await SeedAsync(paths, goal);
             var web = new FakeWeb { BlockSearch = true };
             await using (var run = await Fixture.OpenAsync(paths, web))
@@ -54,9 +59,7 @@ internal static class AutonomyTests
             web.BlockSearch = false;
             await using var reopened = await Fixture.OpenAsync(paths, web);
             Check.True(!reopened.Engine.CanInitiate, "This test must run without a first message in the new session.");
-            await Tick(reopened.Engine, now.AddMinutes(1));
-            await Tick(reopened.Engine, now.AddMinutes(2));
-            await Tick(reopened.Engine, now.AddMinutes(3));
+            await StepsAsync(reopened.Engine, now.AddMinutes(1), 5);
             var result = await ReadLifeAsync(paths);
             Check.Equal<PersonalGoalState?>(null, result.Active);
             Check.Equal(PersonalGoal.Explore, result.Journal.Single().Goal);
@@ -105,7 +108,7 @@ internal static class AutonomyTests
             await using var reopened = await Fixture.OpenAsync(paths, new FakeWeb());
             Check.True(reopened.Engine.Paused, "The pause did not survive restart.");
             await reopened.Engine.SetBackgroundPauseAsync(false, default);
-            await Tick(reopened.Engine, now.AddMinutes(1));
+            await StepsAsync(reopened.Engine, now.AddMinutes(1), 7);
             var result = await ReadLifeAsync(paths);
             Check.Equal(PersonalGoal.Write, result.Journal.Single().Goal);
             Check.True(File.Exists(paths.Inside(result.Journal.Single().Reference)), "The resumed writing goal did not create a real file.");
@@ -117,7 +120,8 @@ internal static class AutonomyTests
             var now = DateTimeOffset.UtcNow;
             var web = new FakeWeb();
             string? question = null;
-            await SeedAsync(paths, new(PersonalGoal.Company, Guid.NewGuid(), now, "Cyanotypes"));
+            await SeedAsync(paths, new PersonalGoalState(PersonalGoal.Company, Guid.NewGuid(), now, "Cyanotypes")
+                { Facts = PersonalFact.Planned });
             await using var run = await Fixture.OpenAsync(paths, web, google: (text, _) =>
             {
                 question = text;
@@ -128,9 +132,7 @@ internal static class AutonomyTests
             await Tick(run.Engine, now, idle: TimeSpan.FromMinutes(8));
             Check.True(question?.Contains("Anna Atkins") == true && !question.Contains("7a9"), "Google did not get a scoped public question.");
             Check.True((await ReadLifeAsync(paths)).Active!.Failed.Contains(PersonalAction.AskGoogle), "The failure did not reach the planner.");
-            await Tick(run.Engine, now.AddMinutes(1));
-            await Tick(run.Engine, now.AddMinutes(2));
-            await Tick(run.Engine, now.AddMinutes(3));
+            await StepsAsync(run.Engine, now.AddMinutes(1), 5);
             Check.Equal(FakeWeb.Source, (await ReadLifeAsync(paths)).Journal.Single().Reference);
         });
 
@@ -143,16 +145,161 @@ internal static class AutonomyTests
             Check.True(run.Output.Lines.Any(line => line.Contains("couldn't complete that lookup")), "The immediate reply hid the failed attempt.");
             var store = new PersonalLife(paths);
             await store.LoadAsync(default);
-            Check.Equal(FakeWeb.Original, store.State.Challenge?.Target);
+            Check.Equal(FakeWeb.Original, store.State.Backlog.Single().Goal.Challenge?.Target);
             var now = DateTimeOffset.UtcNow;
-            // A fresh session selects the recorded learning challenge from its checkpoint.
-            await store.SaveAsync(store.State with
-                { Active = new(PersonalGoal.Recover, Guid.NewGuid(), now, "Reading public web sources") }, default);
             await using var reopened = await Fixture.OpenAsync(paths, web);
-            for (var step = 0; step < 4; step++) await Tick(reopened.Engine, now.AddMinutes(step));
+            await StepsAsync(reopened.Engine, now, 6);
             var done = await ReadLifeAsync(paths);
-            Check.True(done.Challenge is null && done.Notice?.Text.Contains("managed to read") == true, "No verified recovery was recorded.");
+            Check.True(done.Backlog.Length == 0 && done.Notice?.Text.Contains("managed to read") == true, "No verified recovery was recorded.");
             Check.Equal(2, web.Reads.Count(url => url == FakeWeb.Original));
+        });
+
+        await suite.Case("a story keeps three scenes, waits for its targeted revision, and later extends the same titled file", async root =>
+        {
+            var paths = new PortablePaths(root);
+            var now = DateTimeOffset.UtcNow;
+            var goal = new PersonalGoalState(PersonalGoal.Write, Guid.NewGuid(), now, "Tiny stories");
+            await SeedAsync(paths, goal);
+            var model = new TestModel("revise", "accept", "accept");
+            await using (var run = await Fixture.OpenAsync(paths, new FakeWeb(), testModel: model))
+            {
+                await StepsAsync(run.Engine, now, 2);
+                var first = (await ReadLifeAsync(paths)).Active!;
+                Check.Equal(goal.Id, first.Id);
+                Check.Equal(1, first.Project.Scenes.Length);
+                Check.True(model.OpeningContext.Contains("behind the closed ferry office") &&
+                    !model.OpeningContext.Contains("The ferry answers"), "The opening prompt exposed the ending.");
+                Check.True(!Directory.Exists(paths.Inside(PersonalWriting.Folder)), "An unfinished first scene was published.");
+            }
+            string story;
+            string reference;
+            DateTimeOffset due;
+            await using (var run = await Fixture.OpenAsync(paths, new FakeWeb(), testModel: model))
+            {
+                await StepsAsync(run.Engine, now.AddMinutes(2), 3);
+                var reviewed = (await ReadLifeAsync(paths)).Active!;
+                Check.Equal(3, reviewed.Project.Scenes.Length);
+                Check.Equal("revise", reviewed.Project.Review?.Decision);
+                Check.True(!Directory.Exists(paths.Inside(PersonalWriting.Folder)), "The rejected draft was published.");
+                await StepsAsync(run.Engine, now.AddMinutes(5), 4);
+                var complete = await ReadLifeAsync(paths);
+                reference = complete.Journal.Single().Reference;
+                Check.Equal(PersonalWriting.Folder + "/The Bell Under Glass.md", reference);
+                story = await File.ReadAllTextAsync(paths.Inside(reference));
+                Check.True(story.Contains("changed the price of her choice") && story.Contains("the ferry arrived"), "The targeted revision or ending was lost.");
+                var revisit = complete.Backlog.Single();
+                Check.Equal(goal.Id, revisit.Goal.Id);
+                Check.Equal(reference, revisit.Goal.Reference);
+                Check.True(run.Engine.DescribePersonalLife(now).Contains("Reread the story with fresh eyes"), "The follow-up wasn't visible.");
+                due = revisit.Due;
+            }
+            await using var reopened = await Fixture.OpenAsync(paths, new FakeWeb(), testModel: model);
+            await StepsAsync(reopened.Engine, due, 6);
+            var extended = await File.ReadAllTextAsync(paths.Inside(reference));
+            Check.True(extended.StartsWith(story.TrimEnd(), StringComparison.Ordinal) && extended.Contains("the apprentice returned"), "The revisit did not extend the same story.");
+            Check.Equal(1, Directory.GetFiles(paths.Inside(PersonalWriting.Folder), "*.md").Length);
+        });
+
+        await suite.Case("a deferred review survives restart with its draft and is resumed when due", async root =>
+        {
+            var paths = new PortablePaths(root);
+            var now = DateTimeOffset.UtcNow;
+            var goal = new PersonalGoalState(PersonalGoal.Write, Guid.NewGuid(), now, "Tiny stories");
+            await SeedAsync(paths, goal);
+            var model = new TestModel("defer", "accept");
+            DateTimeOffset due;
+            await using (var run = await Fixture.OpenAsync(paths, new FakeWeb(), testModel: model))
+            {
+                await StepsAsync(run.Engine, now, 5);
+                var deferred = await ReadLifeAsync(paths);
+                Check.True(deferred.Active is null && deferred.Journal.Length == 0, "A deferred review was treated as done.");
+                var item = deferred.Backlog.Single();
+                Check.Equal(goal.Id, item.Goal.Id);
+                Check.Equal(3, item.Goal.Project.Scenes.Length);
+                Check.True(item.Due > now.AddMinutes(4), "The project wasn't actually deferred.");
+                due = item.Due;
+            }
+            await using var reopened = await Fixture.OpenAsync(paths, new FakeWeb(), testModel: model);
+            await StepsAsync(reopened.Engine, due, 4);
+            Check.Equal(PersonalGoal.Write, (await ReadLifeAsync(paths)).Journal.Single().Goal);
+            Check.Equal(1, model.OutlineCalls, "The resumed project discarded its outline.");
+        });
+
+        await suite.Case("a web outage defers the same goal and retries without discarding its plan", async root =>
+        {
+            var paths = new PortablePaths(root);
+            var now = DateTimeOffset.UtcNow;
+            var goal = new PersonalGoalState(PersonalGoal.Explore, Guid.NewGuid(), now, "Cyanotypes");
+            await SeedAsync(paths, goal);
+            var web = new FakeWeb { FailSearch = true };
+            DateTimeOffset due;
+            await using (var run = await Fixture.OpenAsync(paths, web))
+            {
+                await StepsAsync(run.Engine, now, 2);
+                var state = await ReadLifeAsync(paths);
+                var deferred = state.Backlog.Single();
+                Check.Equal(goal.Id, deferred.Goal.Id);
+                Check.True(deferred.Goal.Facts.HasFlag(PersonalFact.Planned) && state.Journal.Length == 0, "The failed search lost its plan or got published.");
+                due = state.ResearchAfter > deferred.Due ? state.ResearchAfter : deferred.Due;
+            }
+            web.FailSearch = false;
+            await using var reopened = await Fixture.OpenAsync(paths, web);
+            await StepsAsync(reopened.Engine, due, 5);
+            Check.Equal(FakeWeb.Source, (await ReadLifeAsync(paths)).Journal.Single().Reference);
+            Check.Equal(2, web.Queries.Count);
+        });
+
+        await suite.Case("a research review can send the same project back for a second source", async root =>
+        {
+            var paths = new PortablePaths(root);
+            var now = DateTimeOffset.UtcNow;
+            await SeedAsync(paths, new(PersonalGoal.Explore, Guid.NewGuid(), now, "Cyanotypes"));
+            var web = new FakeWeb { ExtraSource = true };
+            await using var run = await Fixture.OpenAsync(paths, web, testModel: new("research", "accept"));
+            await StepsAsync(run.Engine, now, 5);
+            Check.Equal(0, (await ReadLifeAsync(paths)).Journal.Length, "The initial reflection was published despite needing another source.");
+            await StepsAsync(run.Engine, now.AddMinutes(5), 4);
+            Check.Equal(FakeWeb.Additional, (await ReadLifeAsync(paths)).Journal.Single().Reference);
+            Check.Equal("https://example.com/process,https://example.com/additional-process", string.Join(',', web.Reads));
+        });
+
+        await suite.Case("a natural diary naming request queues a real content-based rename and preserves colliding files", async root =>
+        {
+            var paths = new PortablePaths(root);
+            const string old = PersonalWriting.Folder + "/4b4590054c3b492d87b7e1c004426cb8.md";
+            const string taken = PersonalWriting.Folder + "/The Light on the Glass.md";
+            Directory.CreateDirectory(paths.Inside(PersonalWriting.Folder));
+            await File.WriteAllTextAsync(paths.Inside(old), "The blue light found the edge of the paper.");
+            await File.WriteAllTextAsync(paths.Inside(taken), "My earlier, unrelated story.");
+            await new PersonalLife(paths).SaveAsync(new() { Journal = [new(DateTimeOffset.UtcNow, PersonalGoal.Write,
+                "Cyanotypes", "An earlier piece.", old)] }, default);
+            await using var run = await Fixture.OpenAsync(paths, new FakeWeb());
+            await run.Engine.RespondAsync("Не могла бы ты называть записи своего дневника человеческими названиями? Например " +
+                Path.GetFileName(old), "user", false, false, default);
+            Check.True(run.Output.Lines.Any(line => line.Contains("put the title change on my list")) &&
+                File.Exists(paths.Inside(old)), "The acknowledgement didn't reflect the real queued task.");
+            await StepsAsync(run.Engine, DateTimeOffset.UtcNow, 2);
+            var note = (await ReadLifeAsync(paths)).Journal.Single();
+            Check.Equal("The Light on the Glass", note.Title);
+            Check.Equal(PersonalWriting.Folder + "/The Light on the Glass (2).md", note.Reference);
+            Check.True(!File.Exists(paths.Inside(old)), "The original file name remained.");
+            Check.Equal("The blue light found the edge of the paper.", await File.ReadAllTextAsync(paths.Inside(note.Reference)));
+            Check.Equal("My earlier, unrelated story.", await File.ReadAllTextAsync(paths.Inside(taken)));
+            Check.True(ReplyQuality.ClaimsComputerAction("I'll rename them now so they match the content instead."), "Chat can still promise the unqueued rename.");
+        });
+
+        await suite.Case("a personal drawing is reviewed from rendered pixels before a PNG is saved", async root =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var paths = new PortablePaths(root);
+            await SeedAsync(paths, new(PersonalGoal.Sketch, Guid.NewGuid(), now, "Colour and light"));
+            var model = new TestModel();
+            await using var run = await Fixture.OpenAsync(paths, new FakeWeb(), testModel: model);
+            await StepsAsync(run.Engine, now, 3);
+            Check.True(model.ReviewedImage && !Directory.Exists(paths.Inside("documents/evelyn-sketches")),
+                "The image didn't receive its own review before publication.");
+            await Tick(run.Engine, now.AddMinutes(3));
+            Check.True(File.Exists(paths.Inside((await ReadLifeAsync(paths)).Journal.Single().Reference)), "The approved PNG wasn't saved.");
         });
 
         await suite.Case("an A/B choice saves only the selected dialogue response", async root =>
@@ -186,6 +333,11 @@ internal static class AutonomyTests
         engine.TickPersonalLifeAsync(now, idle ?? TimeSpan.Zero, quiet: true, canSpeak: false, null,
             _ => throw new InvalidOperationException("Unexpected training."), ct, default);
 
+    private static async Task StepsAsync(CompanionEngine engine, DateTimeOffset start, int steps)
+    {
+        for (var step = 0; step < steps; step++) await Tick(engine, start.AddMinutes(step));
+    }
+
     private static async Task SeedAsync(PortablePaths paths, PersonalGoalState goal) =>
         await new PersonalLife(paths).SaveAsync(new() { Active = goal }, default);
 
@@ -200,10 +352,13 @@ internal static class AutonomyTests
     {
         internal const string Source = "https://example.com/process";
         internal const string Original = "https://example.com/public-guide";
+        internal const string Additional = "https://example.com/additional-process";
         internal List<string> Queries { get; } = [];
         internal List<string> Reads { get; } = [];
         internal bool FailOriginal { get; init; }
         internal bool BlockSearch { get; set; }
+        internal bool FailSearch { get; set; }
+        internal bool ExtraSource { get; init; }
         internal TaskCompletionSource SearchStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public async Task<SearchResponse> SearchAsync(string query, bool news, CancellationToken ct)
@@ -211,7 +366,10 @@ internal static class AutonomyTests
             Queries.Add(query);
             SearchStarted.TrySetResult();
             if (BlockSearch) await Task.Delay(Timeout.Infinite, ct);
-            return new(query, "fixture", [new("Process", Source, "")], []);
+            if (FailSearch) throw new IOException("The public search fixture is temporarily unavailable.");
+            SearchHit[] hits = ExtraSource ? [new("Process", Source, ""), new("Another view", Additional, "")] :
+                [new("Process", Source, "")];
+            return new(query, "fixture", hits, []);
         }
 
         public Task<WebArticle> ReadAsync(string url, CancellationToken ct)
@@ -224,16 +382,49 @@ internal static class AutonomyTests
         }
     }
 
-    private sealed class TestModel : IChatModel
+    private sealed class TestModel(params string[] decisions) : IChatModel
     {
         internal const string Alternative = "My favourite scraps are the ones that still have a little mystery in them.";
+        private readonly Queue<string> reviews = new(decisions);
+        internal int OutlineCalls { get; private set; }
+        internal bool ReviewedImage { get; private set; }
+        internal string OpeningContext { get; private set; } = "";
+
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)
+        {
+            if (purpose == GenerationPurpose.PersonalOutline)
+            {
+                OutlineCalls++;
+                return Task.FromResult("""{"title":"The Bell Under Glass","aim":"Ada must give up the last family bell to get a stranger home.","scenes":["Ada finds the broken bell behind the closed ferry office.","She chooses to spend its metal on a new crossing signal.","The ferry answers, and Ada returns to an empty shelf."]}""");
+            }
+            if (purpose == GenerationPurpose.PersonalReview)
+            {
+                ReviewedImage |= messages.Any(message => message.Image is { Length: > 100 });
+                var decision = reviews.TryDequeue(out var next) ? next : "accept";
+                return Task.FromResult(JsonSerializer.Serialize(new { decision, feedback = "Make the price of Ada's choice tangible.", scene = 2 }));
+            }
+            if (purpose == GenerationPurpose.PersonalScene)
+            {
+                var instruction = messages[0].Text;
+                if (instruction.Contains("scene 1 of")) OpeningContext = messages[^1].Text;
+                var seed = instruction.Contains("additional scene") ? "After winter the apprentice returned with a box of salt and whispered that another signal now marked the turning." :
+                    instruction.Contains("scene 1 of") ? "Ada unlocked the office, crossed the empty ferry shed and found a cracked bell under the old inventory board." :
+                    instruction.Contains("scene 3 of") ? "Before evening the ferry arrived from across the channel and carried the stranger, whose boots left wet tracks on the deck." :
+                    instruction.Contains("Rewrite only") ? "When Ada touched the empty hook, the loss changed the price of her choice. She finally put her mother's bell into the forge." :
+                    "At the forge Ada bartered her bell for an iron signal, and the smith left a little dent beside the handle.";
+                return Task.FromResult(string.Join(' ', Enumerable.Repeat(seed, 7)));
+            }
+            if (purpose == GenerationPurpose.Sketch)
+                return Task.FromResult("""{"title":"A Corner of the Window","background":"#203040","shapes":[{"kind":"rectangle","color":"#9B662B","x":16,"y":16,"w":50,"h":48},{"kind":"ellipse","color":"#F8B722","x":18,"y":30,"w":24,"h":22},{"kind":"triangle","color":"#EBE1B0","x":45,"y":45,"w":21,"h":30}]}""");
+            return CompleteAsync(messages, purpose == GenerationPurpose.Metadata, ct);
+        }
         public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct)
         {
             var system = messages[0].Text;
             return Task.FromResult(json ? """{"speak":false,"reply":"","actions":[]}""" :
                 system.Contains("second natural English reply") ? Alternative :
-                system.Contains("private diary entry") ? "The cyanotype keeps the shape of the fern. I want to try an uneven edge." :
-                system.Contains("vignette or poem") ? "A loose page waited in the blue light." :
+                system.Contains("private diary reflection") ? "The cyanotype keeps the shape of the fern. I want to try an uneven edge." :
+                system.Contains("existing piece a memorable human title") ? "The Light on the Glass" :
                 "I like the kind of thought that keeps one small surprise.");
         }
     }
@@ -248,7 +439,7 @@ internal static class AutonomyTests
         WeatherService Weather, Output Output) : IAsyncDisposable
     {
         internal static async Task<Fixture> OpenAsync(PortablePaths paths, FakeWeb web, NeedLevels? initial = null,
-            Func<string, CancellationToken, Task<GoogleVisualResult>>? google = null)
+            Func<string, CancellationToken, Task<GoogleVisualResult>>? google = null, TestModel? testModel = null)
         {
             var config = new AppConfig();
             config.Audio.Enabled = false;
@@ -263,7 +454,7 @@ internal static class AutonomyTests
             var audio = new AudioService(paths.Root, config.Audio);
             var weather = new WeatherService(config);
             var output = new Output();
-            var engine = new CompanionEngine(paths, config, new TestModel(), memory, emotions, new(config.Desktop),
+            var engine = new CompanionEngine(paths, config, testModel ?? new TestModel(), memory, emotions, new(config.Desktop),
                 audio, output, weather, webResearch: web) { PersonalGoogleOverride = google };
             await engine.InitializePersonalLifeAsync(default);
             return new(engine, config, memory, audio, weather, output);

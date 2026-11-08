@@ -2,53 +2,98 @@ using ComputerNeighbour.Personality;
 
 namespace ComputerNeighbour.Application;
 
-internal enum PersonalGoal { Rest, Explore, Company, Read, Write, Sketch, Revisit, Practice, Recover, Train }
-internal enum PersonalAction { Sleep, Search, ReadArticle, AskGoogle, ReadFile, ReadDiary, Reflect, Write, Sketch, Exercise, Retry, Train }
+internal enum PersonalGoal { Rest, Explore, Company, Read, Write, Sketch, Revisit, Practice, Recover, Train, ContinueStory, NameEntry }
+internal enum PersonalAction
+{
+    Sleep, Search, ReadArticle, AskGoogle, ReadFile, ReadDiary, Reflect, Write, Sketch, Exercise, Retry, Train,
+    Plan, Outline, Opening, TurningPoint, Ending, DrawDraft, Review, Revise, SaveNote, SaveExercise,
+    LoadStory, ContinueStory, ReserveTitle, TitleEntry, RenameEntry, PlanContinuation
+}
 
 [Flags]
 internal enum PersonalFact
 {
-    None = 0, FoundSource = 1, ReadMaterial = 2, Reflected = 4, Created = 8, Practiced = 16, Rested = 32, Trained = 64
+    None = 0, FoundSource = 1, ReadMaterial = 2, Reflected = 4, Created = 8, Practiced = 16, Rested = 32, Trained = 64,
+    Planned = 128, Opening = 256, Middle = 512, Drafted = 1024, Reviewed = 2048, Accepted = 4096, Reserved = 8192
 }
 
 internal static class AutonomyPlanner
 {
-    private sealed record Step(PersonalAction Action, PersonalFact Requires, PersonalFact Adds, double Effort);
+    private sealed record Step(PersonalFact Requires, PersonalFact Adds, double Effort,
+        PersonalFact Clears = 0, PersonalFact Forbids = 0)
+    {
+        internal PersonalFact Apply(PersonalFact facts) => (facts & ~Clears) | Adds;
+    }
     private sealed record Recipe(PersonalFact Desired, PersonalAction[] Actions);
     private static readonly Step[] Steps =
     [
-        new(PersonalAction.Sleep, 0, PersonalFact.Rested, 0),
-        new(PersonalAction.Search, 0, PersonalFact.FoundSource, .02),
-        new(PersonalAction.ReadArticle, PersonalFact.FoundSource, PersonalFact.ReadMaterial, .035),
-        new(PersonalAction.AskGoogle, 0, PersonalFact.ReadMaterial, .055),
-        new(PersonalAction.ReadFile, 0, PersonalFact.ReadMaterial, .03),
-        new(PersonalAction.ReadDiary, 0, PersonalFact.ReadMaterial, .01),
-        new(PersonalAction.Reflect, PersonalFact.ReadMaterial, PersonalFact.Reflected, .035),
-        new(PersonalAction.Write, 0, PersonalFact.Created, .10),
-        new(PersonalAction.Sketch, 0, PersonalFact.Created, .11),
-        new(PersonalAction.Exercise, 0, PersonalFact.Practiced, .075),
-        new(PersonalAction.Retry, PersonalFact.Reflected, PersonalFact.Practiced, .06),
-        new(PersonalAction.Train, 0, PersonalFact.Trained, .08)
+        new(0, PersonalFact.Rested, 0), // Sleep
+        new(PersonalFact.Planned, PersonalFact.FoundSource, .02), // Search
+        new(PersonalFact.Planned | PersonalFact.FoundSource, PersonalFact.ReadMaterial, .03), // ReadArticle
+        new(PersonalFact.Planned, PersonalFact.ReadMaterial, .05), // AskGoogle
+        new(PersonalFact.Planned, PersonalFact.ReadMaterial, .02), // ReadFile
+        new(PersonalFact.Planned, PersonalFact.ReadMaterial, .01), // ReadDiary
+        new(PersonalFact.Planned | PersonalFact.ReadMaterial, PersonalFact.Drafted, .03), // Reflect
+        new(PersonalFact.Reserved, PersonalFact.Created, .01), // Write
+        new(PersonalFact.Accepted, PersonalFact.Created, .02), // Sketch
+        new(PersonalFact.Planned, PersonalFact.Drafted, .035), // Exercise
+        new(PersonalFact.Accepted, PersonalFact.Practiced, .04), // Retry
+        new(PersonalFact.Planned, PersonalFact.Trained, .08), // Train
+        new(0, PersonalFact.Planned, .02),
+        new(0, PersonalFact.Planned, .03), // Outline
+        new(PersonalFact.Planned, PersonalFact.Opening, .04),
+        new(PersonalFact.Opening, PersonalFact.Middle, .04),
+        new(PersonalFact.Middle, PersonalFact.Drafted, .04),
+        new(PersonalFact.Planned, PersonalFact.Drafted, .07), // DrawDraft
+        new(PersonalFact.Drafted, PersonalFact.Reviewed | PersonalFact.Accepted, .025, Forbids: PersonalFact.Reviewed),
+        new(PersonalFact.Reviewed, 0, .045, Clears: PersonalFact.Reviewed, Forbids: PersonalFact.Accepted),
+        new(PersonalFact.Accepted, PersonalFact.Reflected, .01),
+        new(PersonalFact.Accepted, PersonalFact.Practiced, .01),
+        new(0, PersonalFact.ReadMaterial, .01), // LoadStory
+        new(PersonalFact.ReadMaterial | PersonalFact.Planned, PersonalFact.Drafted, .045), // ContinueStory
+        new(PersonalFact.Accepted, PersonalFact.Reserved, .01), // ReserveTitle
+        new(0, PersonalFact.Reserved, .025), // TitleEntry
+        new(PersonalFact.Reserved, PersonalFact.Created, .01), // RenameEntry
+        new(PersonalFact.ReadMaterial, PersonalFact.Planned, .02) // PlanContinuation
     ];
     private static readonly Dictionary<PersonalGoal, Recipe> Recipes = new()
     {
         [PersonalGoal.Rest] = new(PersonalFact.Rested, [PersonalAction.Sleep]),
-        [PersonalGoal.Explore] = new(PersonalFact.Reflected, [PersonalAction.Search, PersonalAction.ReadArticle, PersonalAction.Reflect]),
-        [PersonalGoal.Company] = new(PersonalFact.Reflected, [PersonalAction.AskGoogle, PersonalAction.Search, PersonalAction.ReadArticle, PersonalAction.Reflect]),
-        [PersonalGoal.Read] = new(PersonalFact.Reflected, [PersonalAction.ReadFile, PersonalAction.Reflect]),
-        [PersonalGoal.Write] = new(PersonalFact.Created, [PersonalAction.Write]),
-        [PersonalGoal.Sketch] = new(PersonalFact.Created, [PersonalAction.Sketch]),
-        [PersonalGoal.Revisit] = new(PersonalFact.Reflected, [PersonalAction.ReadDiary, PersonalAction.Reflect]),
-        [PersonalGoal.Practice] = new(PersonalFact.Practiced, [PersonalAction.Exercise]),
-        [PersonalGoal.Recover] = new(PersonalFact.Practiced, [PersonalAction.Search, PersonalAction.ReadArticle, PersonalAction.Reflect, PersonalAction.Retry]),
-        [PersonalGoal.Train] = new(PersonalFact.Trained, [PersonalAction.Train])
+        [PersonalGoal.Explore] = NoteRecipe(PersonalAction.Search, PersonalAction.ReadArticle),
+        [PersonalGoal.Company] = NoteRecipe(PersonalAction.AskGoogle, PersonalAction.Search, PersonalAction.ReadArticle),
+        [PersonalGoal.Read] = NoteRecipe(PersonalAction.ReadFile),
+        [PersonalGoal.Write] = new(PersonalFact.Created, [PersonalAction.Outline, PersonalAction.Opening, PersonalAction.TurningPoint,
+            PersonalAction.Ending, PersonalAction.Review, PersonalAction.Revise, PersonalAction.ReserveTitle, PersonalAction.Write]),
+        [PersonalGoal.Sketch] = new(PersonalFact.Created, [PersonalAction.Plan, PersonalAction.DrawDraft, PersonalAction.Review,
+            PersonalAction.Revise, PersonalAction.Sketch]),
+        [PersonalGoal.Revisit] = NoteRecipe(PersonalAction.ReadDiary),
+        [PersonalGoal.Practice] = new(PersonalFact.Practiced, [PersonalAction.Plan, PersonalAction.Exercise, PersonalAction.Review,
+            PersonalAction.Revise, PersonalAction.SaveExercise]),
+        [PersonalGoal.Recover] = new(PersonalFact.Practiced, [PersonalAction.Plan, PersonalAction.Search, PersonalAction.ReadArticle,
+            PersonalAction.Reflect, PersonalAction.Review, PersonalAction.Revise, PersonalAction.Retry]),
+        [PersonalGoal.Train] = new(PersonalFact.Trained, [PersonalAction.Plan, PersonalAction.Train]),
+        [PersonalGoal.ContinueStory] = new(PersonalFact.Created, [PersonalAction.LoadStory, PersonalAction.PlanContinuation, PersonalAction.ContinueStory,
+            PersonalAction.Review, PersonalAction.Revise, PersonalAction.ReserveTitle, PersonalAction.Write]),
+        [PersonalGoal.NameEntry] = new(PersonalFact.Created, [PersonalAction.TitleEntry, PersonalAction.RenameEntry])
     };
+
+    private static Recipe NoteRecipe(params PersonalAction[] acquire) => new(PersonalFact.Reflected,
+        [PersonalAction.Plan, .. acquire, PersonalAction.Reflect, PersonalAction.Review, PersonalAction.Revise, PersonalAction.SaveNote]);
 
     internal static bool NeedsSleep(NeedLevels n) => n.Energy <= .27 || n.Fatigue >= .80;
 
-    internal static PersonalGoal? Choose(NeedLevels n, PersonalGoal? previous, Func<PersonalGoal, bool> viable, Func<double> sample)
+    internal static bool ResearchIsDue(IReadOnlyList<PersonalGoal> recent) =>
+        recent.Count >= 3 && recent.TakeLast(3).All(goal => goal is not (PersonalGoal.Explore or PersonalGoal.Company or PersonalGoal.Recover));
+
+    internal static PersonalGoal? Choose(NeedLevels n, PersonalGoal? previous, Func<PersonalGoal, bool> viable, Func<double> sample,
+        IReadOnlyList<PersonalGoal>? recent = null)
     {
         if (NeedsSleep(n) && viable(PersonalGoal.Rest)) return PersonalGoal.Rest;
+        if (recent is not null && ResearchIsDue(recent))
+        {
+            if (viable(PersonalGoal.Company) && n.Loneliness >= .75) return PersonalGoal.Company;
+            if (viable(PersonalGoal.Explore)) return PersonalGoal.Explore;
+        }
         var ready = n.Energy * (1 - n.Fatigue * .6);
         (PersonalGoal Goal, double Utility)[] goals =
         [
@@ -63,12 +108,17 @@ internal static class AutonomyPlanner
             (PersonalGoal.Train, .36 + .24*n.Ambition + .14*n.Confidence + .21*ready)
         ];
         return goals.Where(item => viable(item.Goal))
-            .OrderByDescending(item => item.Utility - (item.Goal == previous ? .20 : 0) + .13 * sample())
+            .OrderByDescending(item => item.Utility - (item.Goal == previous ? .20 : 0) -
+                .14 * (recent?.TakeLast(5).Count(goal => goal == item.Goal) ?? 0) + .13 * sample())
             .Select(item => (PersonalGoal?)item.Goal).FirstOrDefault();
     }
 
     internal static bool Achieved(PersonalGoal goal, PersonalFact facts) => facts.HasFlag(Recipes[goal].Desired);
-    internal static PersonalFact Effects(PersonalAction action) => Steps[(int)action].Adds;
+    internal static PersonalFact Advance(PersonalAction action, PersonalFact known, bool accepted = true)
+    {
+        var result = Steps[(int)action].Apply(known);
+        return action == PersonalAction.Review && !accepted ? result & ~PersonalFact.Accepted : result;
+    }
     internal static double Effort(PersonalAction action) => Steps[(int)action].Effort;
 
     internal static IReadOnlyList<PersonalAction> Plan(PersonalGoal goal, PersonalFact known, NeedLevels needs,
@@ -85,9 +135,11 @@ internal static class AutonomyPlanner
             foreach (var action in recipe.Actions)
             {
                 var step = Steps[(int)action];
-                if (!node.Facts.HasFlag(step.Requires) || node.Facts.HasFlag(step.Adds) || !available(action)) continue;
+                var result = step.Apply(node.Facts);
+                if (!node.Facts.HasFlag(step.Requires) || (node.Facts & step.Forbids) != 0 ||
+                    result == node.Facts || !available(action)) continue;
                 var effort = step.Effort * (1 + needs.Fatigue * 3 - needs.Energy * .5);
-                frontier.Enqueue((node.Facts | step.Adds, [.. node.Path, action]), cost + 1 + effort);
+                frontier.Enqueue((result, [.. node.Path, action]), cost + 1 + effort);
             }
         }
         return [];

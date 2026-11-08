@@ -309,6 +309,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             if(!forceWork&&!forceScreen&&speaker!="system-event"&&await TryWorkTaskAsync(input,mainSpeaker,ct))return;
             if(mainSpeaker)lastTurnWasWorkTask=false;
             await memory.AppendAsync("user",input,speaker,ct);
+            if(ownerTurn&&!forceWork&&!forceScreen&&await TryQueueDiaryTitlesAsync(input,ct))return;
         }
         else if(RecentUnsharedSketch(DateTimeOffset.Now) is {Length:>0} sketchTitle)
         {

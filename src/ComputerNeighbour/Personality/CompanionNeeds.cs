@@ -80,8 +80,14 @@ internal sealed class CompanionNeeds(NeedsOptions options,NeedLevels initial)
     }
 
     public void NotePersonalStep(double effort, bool discovery = false, bool creative = false, bool social = false,
-        bool reflected = false, bool practiced = false, bool failed = false)
+        bool reflected = false, bool practiced = false, bool failed = false, bool milestone = true)
     {
+        if (!milestone)
+        {
+            Levels = Levels with { Energy = Bound(Levels.Energy - effort), Fatigue = Bound(Levels.Fatigue + effort * .8),
+                Focus = Bound(Levels.Focus - effort / 2) };
+            return;
+        }
         Levels = Levels with
         {
             Energy = Bound(Levels.Energy - effort),

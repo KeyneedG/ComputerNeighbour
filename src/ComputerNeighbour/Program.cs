@@ -105,8 +105,8 @@ public static class Program
                         if (trainingDone && evt.Kind is ("tick" or "lora-done") && !queued.HasInput)
                         {
                             trainingDone = false;
-                            if (await learning.FinishTrainingAsync(shutdown.Token) is { } completed)
-                                await regularEngine.NoteTrainingResultAsync(completed, shutdown.Token);
+                            var completed = await learning.FinishTrainingAsync(shutdown.Token);
+                            if (!learning.IsTraining) await regularEngine.NoteTrainingResultAsync(completed, shutdown.Token);
                         }
                         if(evt.Kind=="lora-done")continue;
                         if(evt.Kind=="text"&&CompanionSession.IsIncognitoCommand(evt.Text))
@@ -368,7 +368,7 @@ public static class Program
     /enroll NAME   Enroll the next held-key recording as a speaker (speak alone)
     /devices       List input/output audio devices
     /status        Mood, personal drives, active goal and memory status
-    /life          Show the current personal goal and diary/practice counts
+    /life          Show the current personal project, next step, and projects queued for later
     /diary         Read recent personal diary entries
     /memory        Show compressed factual memory
     /thoughts      Show recent interpretations, checks and turn outcomes
