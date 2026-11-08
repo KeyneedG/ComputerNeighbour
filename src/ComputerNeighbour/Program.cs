@@ -94,12 +94,13 @@ public static class Program
                         if(evt.Kind=="exit")break;
                         if(evt.Kind=="text" && evt.Text.StartsWith('/'))
                         {
+                            if(await engine.TryHandleAccessCommandAsync(evt.Text,shutdown.Token))continue;
                             var split=evt.Text.Split(' ',2,StringSplitOptions.RemoveEmptyEntries);var command=split[0].ToLowerInvariant();var arg=split.Length>1?split[1]:"";
                             switch(command)
                             {
                                 case "/exit":case "/quit": shutdown.Cancel();break;
                                 case "/help": ui.Write(Help);break;
-                                case "/status": ui.Write($"Root: {paths.Root}\n{emotions.Status}\n{engine.NeedsStatus}\nMemory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={engine.Paused}; mute={engine.Muted}.");break;
+                                case "/status": ui.Write($"Root: {paths.Root}\n{emotions.Status}\n{engine.NeedsStatus}\n{engine.AccessStatus}\nMemory: {memory.StoredCharacters} recent characters; summary {memory.Summary.Length}; paused={engine.Paused}; mute={engine.Muted}.");break;
                                 case "/pause": engine.Paused=true;engine.InterruptSpeech();ui.Write("Background observation and proactive comments paused. You can still ask me to look.");break;
                                 case "/resume": engine.Paused=false;ui.Write("Background observation and proactive comments resumed.");break;
                                 case "/mute": engine.Muted=!engine.Muted;engine.InterruptSpeech();ui.Write("Voice muted: "+engine.Muted);break;
@@ -121,6 +122,7 @@ public static class Program
                                 case "/compact": await engine.CompactAsync(shutdown.Token);ui.Write("Memory compaction finished.");break;
                                 case "/forget": if(arg=="CONFIRM") {await engine.ForgetConversationAsync(shutdown.Token);ui.Write("Conversation memory, saved tasks and their reminders, web sources and turn notes erased. Character, profile, mood and relationship retained.");}else ui.Write("Type /forget CONFIRM to erase conversation memory and saved tasks.");break;
                                 case "/task":case "/tasks": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
+                                case "/work": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
                                 case "/look": await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -168,7 +170,27 @@ public static class Program
     public static bool IsQuietHour(int hour,int start,int end)=>start==end?false:start<end?hour>=start&&hour<end:hour>=start||hour<end;
     private static async Task ReadInputAsync(ChannelWriter<AppEvent> writer,ConsoleUi ui,CompanionEngine engine,CancellationToken ct)
     {
-        try {while(!ct.IsCancellationRequested) {var line=await ui.ReadLineAsync(ct);if(line is null) {engine.InterruptActivity();await writer.WriteAsync(new("exit","","user"),ct);return;} if(!string.IsNullOrWhiteSpace(line)) {engine.InterruptActivity();engine.InterruptSpeech();await writer.WriteAsync(new("text",line,"user"),ct);}}}catch(OperationCanceledException) { }
+        try
+        {
+            while(!ct.IsCancellationRequested)
+            {
+                var line=await ui.ReadLineAsync(ct);
+                if(line is null)
+                {
+                    engine.InterruptActivity();
+                    await writer.WriteAsync(new("exit","","user"),ct);
+                    return;
+                }
+                if(string.IsNullOrWhiteSpace(line))continue;
+                if(line.Trim().ToLowerInvariant() is not ("/access" or "/status" or "/thoughts" or "/help"))
+                {
+                    engine.InterruptActivity();
+                    engine.InterruptSpeech();
+                }
+                await writer.WriteAsync(new("text",line,"user"),ct);
+            }
+        }
+        catch(OperationCanceledException) { }
     }
     private static async Task MicrophoneAsync(ChannelWriter<AppEvent> writer,AppConfig config,WindowsDesktop desktop,AudioService audio,ConsoleUi ui,CompanionEngine engine,CancellationToken ct)
     {
@@ -231,6 +253,14 @@ public static class Program
     /compact       Compact memory now with the model
     /forget CONFIRM Erase conversation memory and saved tasks
     /approve N     Approve a displayed computer action (expires in 2 minutes)
+    /work TASK     Carry out a task in steps and check the results
+    /access        Show the computer access mode
+    /full access   Permit automatic actions for explicit tasks in this session
+    /ask before edit  Ask before changes and desktop input
+    /approve for me   Delegate approval for the current or next explicit task
+    /desktop on|off   Enable or disable guided desktop input for the session
+    /access default   Restore configured access
+    /cancel        Stop the workflow and discard its pending action
     /reject N      Reject an action
     Edit config/appsettings.json or characters/neighbour.md; restart to reload config.
     """;

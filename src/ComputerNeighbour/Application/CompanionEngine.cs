@@ -256,13 +256,28 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         await InitializeProfileAsync(ct);
         await sourceHistory.InitializeAsync(ct);turnSources.Clear();researchAuthorized=false;
         currentSpeaker=speaker;
+        var ownerTurn=!proactive&&speaker!="system-event"&&IsMainSpeaker(speaker);
+        var forceWork=false;
         if(!proactive)
         {
+            if(IsAccessCommand(input))
+            {
+                ui.Write("Use the console to change computer access.");
+                return;
+            }
+            var request=input.Trim();
+            if(request.Equals("/work",StringComparison.OrdinalIgnoreCase)||request.StartsWith("/work ",StringComparison.OrdinalIgnoreCase))
+            {
+                if(!ownerTurn){ui.Write("Use the console or your enrolled voice for a workflow.");return;}
+                input=request[5..].Trim();
+                if(input.Length==0){ui.Write("Use /work followed by the task you want me to carry out.");return;}
+                forceWork=true;
+            }
             LastInteraction=DateTimeOffset.Now;UnansweredMessages=0;hasUserInteracted=true;
             await profile.ObserveAsync(input,speaker,ct);
             var mainSpeaker=IsMainSpeaker(speaker);
             if(mainSpeaker)needs.NoteConversation(LastInteraction);
-            if(!forceScreen&&speaker!="system-event"&&await TryWorkTaskAsync(input,mainSpeaker,ct))return;
+            if(!forceWork&&!forceScreen&&speaker!="system-event"&&await TryWorkTaskAsync(input,mainSpeaker,ct))return;
             if(mainSpeaker)lastTurnWasWorkTask=false;
             await memory.AppendAsync("user",input,speaker,ct);
         }
@@ -272,7 +287,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             return;
         }
         var contextModel=speaker=="system-event"?null:model as ITurnContextModel;
-        var plan=proactive?new TurnPlan(TurnIntent.Chat):await TurnPlanner.PlanAsync(input,speaker,forceScreen,config,memory.Recent,contextModel,ct);
+        var plan=proactive?new TurnPlan(TurnIntent.Chat):await TurnPlanner.PlanAsync(input,speaker,forceScreen,config,memory.Recent,contextModel,ct,ownerTurn,forceWork);
         if(currentThought is {} thought)
         {
             thought.Route=proactive?"autonomous":plan.Tool?.Tool??plan.Intent.ToString();
@@ -285,10 +300,12 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
                 _=>""
             });
             thought.Uncertainty=plan.Understanding?.Uncertainty??"";
+            if(!proactive)thought.Check("Effort — "+plan.Effort.ToString().ToLowerInvariant()+".");
             if(plan.Planning=="original_fallback")thought.Check("Context preparation was unavailable. I used the original message.");
         }
         if(memory.NeedsCompaction) await CompactAsync(ct);
-        if(plan.Intent is TurnIntent.Screen or TurnIntent.ScreenReaction){await LookAsync(input,plan.Intent==TurnIntent.ScreenReaction,plan.Understanding,ct);return;}
+        if(plan.Intent==TurnIntent.Work){await StartWorkAsync(input,plan,ct);return;}
+        if(plan.Intent is TurnIntent.Screen or TurnIntent.ScreenReaction){await LookAsync(input,plan.Intent==TurnIntent.ScreenReaction,plan.Understanding,ct,plan.Effort);return;}
         var factualReply=plan.Intent switch
         {
             TurnIntent.ScreenFollowup=>ScreenCapability(),
@@ -332,19 +349,20 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         }
         if(!proactive&&explicitIntent is null&&!ConversationContext.NeedsTools(input))
         {
-            await ConverseAsync(input,screen,plan.Understanding,ct);return;
+            await ConverseAsync(input,screen,plan.Understanding,ct,plan.Effort);return;
         }
         if(explicitIntent is {} explicitTool)
         {
-            if(tools.RequiresApproval(explicitTool))
+            var autoApprove=ownerTurn&&tools.ChangesComputer(explicitTool)&&(TakeTaskDelegation()||accessMode==AccessMode.Full);
+            if(RequiresSessionApproval(explicitTool,autoApprove))
             {
                 await AnnounceToolAsync(explicitTool,true,ct);
-                var id=await QueueApprovalAsync(explicitTool,false,ct);
+                var id=await QueueApprovalAsync(explicitTool,false,ct,canDelegate:ownerTurn);
                 await CommitAsync(new() {Reply=id>0?$"I've prepared that action. Please approve request {id} in the console.":"There are too many pending actions. Please approve or reject one first."},false,ct);
                 return;
             }
             await AnnounceToolAsync(explicitTool,false,ct);
-            var result=await ExecuteToolAsync(explicitTool,false,ct);
+            var result=await ExecuteToolAsync(explicitTool,autoApprove,ct);
             if(!result.Success)
             {
                 await CommitAsync(new() {Reply="I couldn't complete that request: "+result.Text},false,ct);return;
@@ -411,7 +429,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
                 try
                 {
                     if(!config.Permissions.WriteFiles)continue;
-                    if(config.Permissions.FullFileAccess)
+                    if(config.Permissions.FullFileAccess&&accessMode!=AccessMode.Ask)
                     {
                         var result=await ExecuteToolAsync(request,true,ct);
                         outcomes.Add(result.Success?result.Text:"I couldn't apply my proposed change: "+result.Text);
@@ -431,8 +449,9 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             var results=new List<ToolResult>();
             foreach(var request in decision.Actions.Take(3))
             {
-                await AnnounceToolAsync(request,tools.RequiresApproval(request),ct);
-                if(tools.RequiresApproval(request))
+                var requiresApproval=RequiresSessionApproval(request);
+                await AnnounceToolAsync(request,requiresApproval,ct);
+                if(requiresApproval)
                 {
                     var id=await QueueApprovalAsync(request,false,ct);
                     if(id<0) { results.Add(new(request.Tool,false,"Too many pending actions. Ask the user to approve/reject existing requests."));continue; }
@@ -460,6 +479,8 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     private static bool IsResearchTool(string name)=>name.Equals("search_web",StringComparison.OrdinalIgnoreCase)||name.Equals("read_web",StringComparison.OrdinalIgnoreCase)||name.Equals("read_browser",StringComparison.OrdinalIgnoreCase);
     private async Task<ToolResult> ExecuteToolAsync(ToolRequest request,bool approved,CancellationToken ct)
     {
+        if(desktopInputOverride==false&&IsWorkInput(request.Tool.ToLowerInvariant()))
+            return new(request.Tool,false,"Desktop input is disabled for this session.");
         if(IsResearchTool(request.Tool)&&(!researchAuthorized))
         {
             currentThought?.Check("A lookup was skipped because the original turn did not authorize it.");
@@ -547,7 +568,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         return image;
     }
 
-    private async Task LookAsync(string input,bool reaction,TurnUnderstanding? understanding,CancellationToken ct)
+    private async Task LookAsync(string input,bool reaction,TurnUnderstanding? understanding,CancellationToken ct,WorkEffort effort)
     {
         if(!config.Permissions.ScreenCapture)
         {
@@ -588,7 +609,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         currentThought?.Check("I captured and attached a current desktop image.");
         var answer=await EnglishAnswerAsync(messages,ct,
             candidate=>!ReplyQuality.DeniesToolAccess(candidate,true,false,false)
-                &&(!reaction||ReplyQuality.IsShortScreenReaction(ReplyQuality.FirstScreenThought(candidate),[])));
+                &&(!reaction||ReplyQuality.IsShortScreenReaction(ReplyQuality.FirstScreenThought(candidate),[])),effort);
         if(reaction&&answer is not null)answer=ReplyQuality.FirstScreenThought(answer);
         if(answer is not null)
         {
@@ -627,35 +648,59 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         ct.ThrowIfCancellationRequested();
     }
 
-    private async Task<int> QueueApprovalAsync(ToolRequest request,bool autonomous,CancellationToken ct)
+    private void PrunePendingActions()
     {
         foreach(var id in pending.Where(p=>DateTimeOffset.Now-p.Value.At>TimeSpan.FromMinutes(2)).Select(p=>p.Key).ToArray())pending.Remove(id);
-        var duplicate=pending.FirstOrDefault(p=>p.Value.Request.Tool==request.Tool&&JsonSerializer.Serialize(p.Value.Request.Args)==JsonSerializer.Serialize(request.Args));
+    }
+
+    private async Task<int> QueueApprovalAsync(ToolRequest request,bool autonomous,CancellationToken ct,WorkRun? work=null,bool canDelegate=false)
+    {
+        PrunePendingActions();
+        var duplicate=pending.FirstOrDefault(p=>p.Value.Work==work&&p.Value.Request.Tool==request.Tool&&JsonSerializer.Serialize(p.Value.Request.Args)==JsonSerializer.Serialize(request.Args));
         if(duplicate.Key>0)return duplicate.Key;
         if(pending.Count>=10)return -1;
         PreparedFileChange? change=null;string? proposalPath=null;
         if(ToolRegistry.IsFileChange(request))
         {
-            if(!config.Permissions.WriteFiles)throw new UnauthorizedAccessException("File writing is disabled.");
-            string Arg(string key)=>request.Args?.TryGetValue(key,out var value)==true&&value.ValueKind==JsonValueKind.String?value.GetString()!:throw new ArgumentException("Missing string argument: "+key);
-            change=request.Tool.Equals("create_file",StringComparison.OrdinalIgnoreCase)?await fileWorkspace.PrepareCreateAsync(Arg("path"),Arg("content"),ct):await fileWorkspace.PrepareEditAsync(Arg("path"),Arg("oldText"),Arg("newText"),ct);
+            change=await PrepareFileChangeAsync(request,ct);
             Directory.CreateDirectory(paths.Inside("data/file-proposals"));
             proposalPath=paths.Inside("data/file-proposals/"+Guid.NewGuid().ToString("N")+".json");
             await File.WriteAllTextAsync(proposalPath,JsonSerializer.Serialize(change,AppConfig.Json),ct);
         }
-        var next=++nextApproval;pending[next]=new(request,DateTimeOffset.Now,change,proposalPath);
+        ct.ThrowIfCancellationRequested();
+        var next=++nextApproval;pending[next]=new(request,DateTimeOffset.Now,change,proposalPath,work,canDelegate);
         var description=change is null?$"[Approval {next}] {request.Tool} {JsonSerializer.Serialize(request.Args,AppConfig.Json)}":$"[Approval {next}{(autonomous?" · character initiative":"")}] {request.Tool} {change.RelativePath}\n{change.Preview}\nFull proposed contents: {proposalPath}";
+        if(work?.Frame is {} frame&&IsWorkInput(request.Tool))
+            description+=$"\nTarget window — {frame.Window.Process} “{ClipWorkText(frame.Window.Title,160)}”.";
         ui.Write(description+$"\nType /approve {next} or /reject {next}. Expires after two minutes.");
         currentThought?.Check("An action was prepared for confirmation.");
         return next;
     }
 
-    private async Task<string?> EnglishAnswerAsync(List<ChatMessage> messages,CancellationToken ct,Func<string,bool>? accept=null)
+    private Task<PreparedFileChange> PrepareFileChangeAsync(ToolRequest request,CancellationToken ct)
+    {
+        if(!config.Permissions.WriteFiles)throw new UnauthorizedAccessException("File writing is disabled.");
+        var args=request.Args??[];
+        string Arg(string key)=>ToolRegistry.Get(args,key);
+        return request.Tool.Equals("create_file",StringComparison.OrdinalIgnoreCase)
+            ?fileWorkspace.PrepareCreateAsync(Arg("path"),Arg("content"),ct)
+            :fileWorkspace.PrepareEditAsync(Arg("path"),Arg("oldText"),Arg("newText"),ct);
+    }
+
+    private static GenerationPurpose DialoguePurpose(WorkEffort effort)=>effort switch
+    {
+        WorkEffort.Deep=>GenerationPurpose.DeepDialogue,
+        WorkEffort.Standard=>GenerationPurpose.StandardDialogue,
+        _=>GenerationPurpose.Dialogue
+    };
+
+    private async Task<string?> EnglishAnswerAsync(List<ChatMessage> messages,CancellationToken ct,Func<string,bool>? accept=null,WorkEffort effort=WorkEffort.Quick)
     {
         for(var attempt=0;attempt<2;attempt++)
         {
             string answer;
-            try{answer=(await model.CompleteAsync(messages,false,ct)).Trim();}
+            try{answer=(await (effort!=WorkEffort.Quick&&attempt==0
+                ?model.CompleteAsync(messages,DialoguePurpose(effort),ct):model.CompleteAsync(messages,false,ct))).Trim();}
             catch(Exception ex) when(ex is InvalidDataException or HttpRequestException||ex is OperationCanceledException&&!ct.IsCancellationRequested)
             {answer="";}
             if(answer.Length is >0 and <=12000&&!answer.StartsWith('{')&&!answer.StartsWith("```",StringComparison.Ordinal)
@@ -701,7 +746,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         return state.Boredom>=.5?"You feel restless and would enjoy something creative.":"";
     }
 
-    private async Task ConverseAsync(string input,byte[]? image,TurnUnderstanding? understanding,CancellationToken ct)
+    private async Task ConverseAsync(string input,byte[]? image,TurnUnderstanding? understanding,CancellationToken ct,WorkEffort effort)
     {
         await relationship.InitializeAsync(ct);
         var character=await ReadCharacterVoiceAsync(ct);
@@ -717,6 +762,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         else system+="No current desktop image was attached to this reply. Do not claim a fresh visual observation or say that the result looks different now. You may refer to genuine earlier observations as past events, or to details the user described. Attribute those details to the user's description.\n";
         system+="Use the character description for personal questions about who you are, what you feel, and how you grow. Use the app facts when the user asks a factual question about the software or its capabilities. For a technical comparison, state the conditions that matter and give precise numbers only when the available evidence supports them.\n";
         system+="Answer the current message first. Return to an earlier topic only when it fits what the user is talking about now. "+OpenThreadGuidance+"\n";
+        if(effort==WorkEffort.Deep)system+="Give enough detail to resolve the hard parts. Explain the key assumptions, trade-offs or checks briefly.\n";
         var spokenReply=config.Audio.Enabled&&config.Audio.UsesExpressiveVoice&&!Muted;
         if(spokenReply)
             system+="Your reply is spoken aloud by the app, which handles vocal delivery separately. If the user asks you to say specific words with a particular emotion, write the words to be spoken. Preserve any exact wording they request and omit stage directions or commentary about how to read it.\n";
@@ -732,7 +778,10 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         string? answer=null;
         for(var attempt=0;attempt<3;attempt++)
         {
-            var candidate=(await model.CompleteAsync(dialogue,GenerationPurpose.Dialogue,ct)).Trim();
+            string candidate;
+            try{candidate=(await model.CompleteAsync(dialogue,DialoguePurpose(attempt==0?effort:WorkEffort.Quick),ct)).Trim();}
+            catch(Exception ex) when(attempt==0&&effort!=WorkEffort.Quick&&(ex is InvalidDataException or HttpRequestException||ex is OperationCanceledException&&!ct.IsCancellationRequested))
+            {currentThought?.Check("The deeper pass was unavailable; I retried with the ordinary model pass.");continue;}
             var confused=ReplyQuality.HasIdentityConfusion(candidate,config.CharacterName,profile.PreferredName);
             var falseMemory=ReplyQuality.DeniesPersistentMemory(candidate);
             var falseCapability=ReplyQuality.DeniesToolAccess(candidate,config.Permissions.ScreenCapture||lastScreenObservation is not null,config.Permissions.ReadFiles,config.Permissions.SearchWeb||config.Permissions.ReadWeb);
@@ -906,6 +955,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
     {
         if(!pending.Remove(id,out var item)) { ui.Write("No such pending action.");return; }
         if(DateTimeOffset.Now-item.At>TimeSpan.FromMinutes(2)) { ui.Write("Action expired; ask again.");return; }
+        if(item.Work is {} work){await RunWorkAsync(work,ct,item);return;}
         if(item.Request.Tool is "click" or "type_text" or "press_key") { ui.Write("Switch to the target window; sending input in 3 seconds.");await Task.Delay(3000,ct); }
         await AnnounceToolAsync(item.Request,false,ct);
         ToolResult result;
@@ -920,12 +970,15 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         }
         else result=await ExecuteToolAsync(item.Request,true,ct);
         ui.Write($"[Tool {result.Tool}] {result.Text}");
-        if(item.Change is not null){await CommitAsync(new() {Reply=result.Success?result.Text:"I couldn't apply the approved change: "+result.Text},false,ct);return;}
-        await RespondAsync("The user explicitly approved a pending tool. Actual result: "+JsonSerializer.Serialize(result,AppConfig.Json)+". Explain the outcome. Do not repeat the action.","system-event",false,false,ct);
+        await CommitAsync(new() {Reply=result.Success?result.Text:"I couldn't complete the approved action. "+result.Text},false,ct);
     }
-    public void Reject(int id) { ui.Write(pending.Remove(id)?"Action rejected.":"No such pending action."); }
+    public void Reject(int id)
+    {
+        if(!pending.Remove(id,out var item)){ui.Write("No such pending action.");return;}
+        ui.Write(item.Work is null?"Action rejected.":"Action rejected. The workflow stopped at that step.");
+    }
     private sealed record ScreenObservation(DateTimeOffset At,string Description);
-    private sealed record PendingAction(ToolRequest Request,DateTimeOffset At,PreparedFileChange? Change,string? ProposalPath);
+    private sealed record PendingAction(ToolRequest Request,DateTimeOffset At,PreparedFileChange? Change,string? ProposalPath,WorkRun? Work,bool CanDelegate);
     public async ValueTask DisposeAsync()
     {
         InterruptActivity();InterruptSpeech();

@@ -61,7 +61,13 @@ public sealed class FileWorkspace
         return new("edit_file", relative, Hash(bytes), decoded.Text, after, Preview(relative, decoded.Text, after));
     }
 
-    public async Task<string> ApplyAsync(PreparedFileChange change, CancellationToken cancellationToken = default)
+    public Task<string> ApplyAsync(PreparedFileChange change, CancellationToken cancellationToken = default) =>
+        ApplyAsync(change, verify: false, cancellationToken);
+
+    internal Task<string> ApplyVerifiedAsync(PreparedFileChange change, CancellationToken cancellationToken) =>
+        ApplyAsync(change, verify: true, cancellationToken);
+
+    private async Task<string> ApplyAsync(PreparedFileChange change, bool verify, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(change);
         if (change.Tool is not ("create_file" or "edit_file")) throw new InvalidDataException("Unknown prepared file operation.");
@@ -127,7 +133,17 @@ public sealed class FileWorkspace
             if (change.Tool == "create_file") File.Move(temporary, full, overwrite: false);
             else File.Replace(temporary, full, destinationBackupFileName: null);
             temporary = null;
-            return change.Tool == "create_file" ? "Created " + change.RelativePath + "." : "Edited " + change.RelativePath + ". Original bytes backed up to " + backupRelative + ".";
+            var result = change.Tool == "create_file" ? "Created " + change.RelativePath + "." : "Edited " + change.RelativePath + ". Original bytes backed up to " + backupRelative + ".";
+            if (!verify) return result;
+            try
+            {
+                // Finish the read-back once the atomic commit has happened, even if the workflow was interrupted.
+                var written = await ReadBoundedAsync(ResolveWritable(change.RelativePath), CancellationToken.None);
+                if (!written.AsSpan().SequenceEqual(payload)) throw new IOException("The saved bytes differ from the committed text.");
+                return result + " Verified the saved bytes.";
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+            { throw new IOException(result + " Verification failed. " + ex.Message, ex); }
         }
         finally
         {

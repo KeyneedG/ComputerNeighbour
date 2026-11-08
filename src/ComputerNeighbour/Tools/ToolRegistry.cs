@@ -25,7 +25,8 @@ public sealed class ToolRegistry(ToolContext context)
 {
     private readonly Dictionary<string,ICompanionTool> tools = new(StringComparer.OrdinalIgnoreCase);
     public void Register(ICompanionTool tool) => tools.Add(tool.Name, tool);
-    public string Describe() => string.Join("\n", tools.Values.Select(t => $"{t.Name}: {t.Description}"));
+    public string Describe(Func<string,bool>? include=null) => string.Join("\n", tools.Values.Where(t=>include is null||include(t.Name)).Select(t => $"{t.Name}: {t.Description}"));
+    internal bool ChangesComputer(ToolRequest request) => tools.TryGetValue(request.Tool,out var tool)&&tool.ChangesComputer;
     public bool RequiresApproval(ToolRequest request) => tools.TryGetValue(request.Tool, out var tool) && tool.ChangesComputer && (IsFileChange(request) ? !context.Config.Permissions.FullFileAccess && (context.Config.Permissions.ConfirmActions || context.Config.Permissions.ConfirmFileChanges) : context.Config.Permissions.ConfirmActions);
     public static bool IsFileChange(ToolRequest request)=>request.Tool.Equals("create_file",StringComparison.OrdinalIgnoreCase)||request.Tool.Equals("edit_file",StringComparison.OrdinalIgnoreCase);
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, bool approved, CancellationToken ct)
@@ -60,10 +61,8 @@ public sealed class ToolRegistry(ToolContext context)
             (a,c,ct)=>fileReader.RunAsync(Get(a,"path"),false,false,ct)));
         result.Register(new DelegateTool("open_app", "args: {name: configured application alias}, e.g. notepad or calculator. No shell commands or arguments.", true, (a,c,ct) =>
         {
-            if (!c.Config.Permissions.OpenApplications) throw new UnauthorizedAccessException("Opening apps is disabled.");
             var name = Get(a,"name");
-            if (!c.Config.Permissions.AllowedApplications.TryGetValue(name,out var exe)) throw new UnauthorizedAccessException("Unknown application alias.");
-            if (!Path.IsPathRooted(exe) && (exe.Contains('/') || exe.Contains('\\'))) exe = c.Paths.Inside(exe);
+            var exe = ResolveApplication(c.Paths,c.Config.Permissions,name);
             c.Desktop.OpenAllowedApp(exe); return Task.FromResult("Application launch requested: " + name);
         }));
         result.Register(new DelegateTool("click", "args: {x: physical screen pixel,y: physical screen pixel}. Click primary button. Requires desktopInput permission.", true, (a,c,ct) =>
@@ -80,7 +79,13 @@ public sealed class ToolRegistry(ToolContext context)
         }));
         return result;
     }
-    private static string Get(Dictionary<string,JsonElement> args,string key) => args.TryGetValue(key,out var value) && value.ValueKind==JsonValueKind.String ? value.GetString()! : throw new ArgumentException("Missing string argument: " + key);
+    internal static string ResolveApplication(PortablePaths paths,PermissionOptions permissions,string name)
+    {
+        if(!permissions.OpenApplications)throw new UnauthorizedAccessException("Opening apps is disabled.");
+        if(!permissions.AllowedApplications.TryGetValue(name,out var exe))throw new UnauthorizedAccessException("Unknown application alias.");
+        return !Path.IsPathRooted(exe)&&(exe.Contains('/')||exe.Contains('\\'))?paths.Inside(exe):exe;
+    }
+    internal static string Get(Dictionary<string,JsonElement> args,string key) => args.TryGetValue(key,out var value) && value.ValueKind==JsonValueKind.String ? value.GetString()! : throw new ArgumentException("Missing string argument: " + key);
     private static void RequireInput(ToolContext c) { if(!c.Config.Permissions.DesktopInput) throw new UnauthorizedAccessException("Desktop input is disabled in config."); }
     private sealed record DelegateTool(string Name,string Description,bool ChangesComputer,Func<Dictionary<string,JsonElement>,ToolContext,CancellationToken,Task<string>> Run) : ICompanionTool
     {

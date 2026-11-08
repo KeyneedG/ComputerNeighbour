@@ -8,11 +8,13 @@ using ComputerNeighbour.Platform;
 namespace ComputerNeighbour.Inference;
 
 public sealed record ChatMessage(string Role, string Text, byte[]? Image = null, bool IsHistory = false);
-public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask }
+public enum GenerationPurpose { Dialogue, Summary, Metadata, ToolPlanning, Sketch, WorkTask, StandardDialogue, DeepDialogue, WorkStep, DeepWorkStep }
 public interface IChatModel
 {
     Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct);
-    Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.WorkTask,ct);
+    Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, GenerationPurpose purpose, CancellationToken ct)=>CompleteAsync(messages,
+        purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning or GenerationPurpose.Sketch or GenerationPurpose.WorkTask
+            or GenerationPurpose.WorkStep or GenerationPurpose.DeepWorkStep,ct);
 }
 
 public interface ITurnContextModel
@@ -24,8 +26,9 @@ public interface ITurnContextModel
 public sealed class LocalModel(PortablePaths paths, ModelOptions options) : IChatModel, ITurnContextModel, IAsyncDisposable
 {
     private static readonly JsonElement ContextSchema=JsonSerializer.Deserialize<JsonElement>("""
-    {"type":"object","additionalProperties":false,"required":["intent","request","uncertainty","evidence"],"properties":{
-      "intent":{"type":"string","enum":["chat","screen","screen_followup","file_capability","web_capability","lookup_term"]},
+    {"type":"object","additionalProperties":false,"required":["intent","request","uncertainty","evidence","effort"],"properties":{
+      "intent":{"type":"string","enum":["chat","screen","screen_followup","file_capability","web_capability","lookup_term","work"]},
+      "effort":{"type":"string","enum":["quick","standard","deep"]},
       "request":{"type":"string","maxLength":450},"uncertainty":{"type":"string","maxLength":180},"evidence":{"type":"string","maxLength":120}
     }}
     """);
@@ -56,6 +59,14 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
       "references":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}}
     }}
     """);
+    private static readonly JsonElement WorkStepSchema=JsonSerializer.Deserialize<JsonElement>("""
+    {"type":"object","additionalProperties":false,"required":["plan","action","reply"],"properties":{
+      "plan":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":160}},
+      "action":{"anyOf":[{"type":"null"},{"type":"object","additionalProperties":false,"required":["tool","args"],"properties":{
+        "tool":{"type":"string","maxLength":32},"args":{"type":"object","additionalProperties":true}}}]},
+      "reply":{"type":"string","maxLength":3600}
+    }}
+    """);
     private static readonly JsonElement DecisionSchema=JsonSerializer.Deserialize<JsonElement>("""
     {"type":"object","additionalProperties":false,"required":["growth","speak","reply","memory","emotion","relationship","actions"],"properties":{
       "growth":{"anyOf":[{"type":"object","additionalProperties":false,"required":["action","kind","name","expression","evidence"],"properties":{
@@ -83,7 +94,7 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         var endpoint = new Uri(options.Endpoint);
         string[] arguments = ["--model", paths.Inside(options.ModelFile), "--mmproj", paths.Inside(options.ProjectorFile), "--host", "127.0.0.1", "--port", endpoint.Port.ToString(), "--ctx-size", options.ContextSize.ToString(), "--n-gpu-layers", options.GpuLayers.ToString(), "--threads", options.Threads.ToString(), "--parallel", "1", "--batch-size", "512", "--ubatch-size", "128", "--image-max-tokens", "1024", "--no-webui", "--offline", "--jinja", "--alias", "neighbour"];
         foreach (var argument in arguments) info.ArgumentList.Add(argument);
-        foreach (var argument in new[] { "--poll", "0", "--poll-batch", "0", "--image-min-tokens", "1024", "--cache-ram", "0", "--cors-origins", "http://127.0.0.1" }) info.ArgumentList.Add(argument);
+        foreach (var argument in new[] { "--poll", "0", "--poll-batch", "0", "--image-min-tokens", "1024", "--cache-ram", "0", "--cors-origins", "http://127.0.0.1", "--reasoning-format", "deepseek" }) info.ArgumentList.Add(argument);
         process = Process.Start(info) ?? throw new IOException("Cannot start llama-server.");
         ChildProcessJob.Attach(process);
         drainTask = Task.WhenAll(DrainAsync(process.StandardOutput, "llama.stdout.log"), DrainAsync(process.StandardError, "llama.stderr.log"));
@@ -122,16 +133,21 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
     {
         GenerationPurpose.Sketch => RequestAsync(messages,true,.65,false,ct,SketchSchema,1350),
         GenerationPurpose.WorkTask => RequestAsync(messages,true,0,false,ct,WorkTaskSchema,1000),
+        GenerationPurpose.StandardDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(1200,options.MaxReplyTokens+240),thinkingBudget:192),
+        GenerationPurpose.DeepDialogue => RequestAsync(messages,false,.6,true,ct,maxTokens:Math.Min(2000,options.MaxReplyTokens+800),thinkingBudget:640),
+        GenerationPurpose.WorkStep => RequestAsync(messages,true,.15,false,ct,WorkStepSchema,1000),
+        GenerationPurpose.DeepWorkStep => RequestAsync(messages,true,.15,false,ct,WorkStepSchema,1700,thinkingBudget:640),
         _ => RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct)
     };
-    public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,320);
+    public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,360);
     public async Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>
         await RequestAsync(messages,true,0,false,ct,SpeechSchemas[sentenceCount-1],140);
-    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null)
+    private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null,int thinkingBudget=0)
     {
         messages = await FitContextAsync(messages,maxTokens??(json ? options.MaxReplyTokens : 1800), ct);
         var converted = messages.Select(m => new Dictionary<string,object?> { ["role"] = m.Role, ["content"] = m.Image is null ? m.Text : new object[] { new { type="text", text=m.Text }, new { type="image_url", image_url=new { url="data:image/png;base64," + Convert.ToBase64String(m.Image) } } } }).ToArray();
-        var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = maxTokens??(json||dialogue ? options.MaxReplyTokens : 1800), ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = false } };
+        var body = new Dictionary<string, object?> { ["model"] = "neighbour", ["messages"] = converted, ["temperature"] = temperature, ["max_tokens"] = maxTokens??(json||dialogue ? options.MaxReplyTokens : 1800), ["stream"] = false, ["chat_template_kwargs"] = new { enable_thinking = thinkingBudget>0 } };
+        if(thinkingBudget>0)body["thinking_budget_tokens"]=thinkingBudget;
         if(dialogue){body["repeat_penalty"]=1.1;body["repeat_last_n"]=256;body["top_p"]=0.9;}
         if (json) body["response_format"] = new { type = "json_object", schema=schema??DecisionSchema };
         using var response = await client.PostAsJsonAsync("v1/chat/completions", body, ct);
@@ -143,7 +159,14 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options) : ICha
         using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
         var choice = doc.RootElement.GetProperty("choices")[0];
         if (choice.TryGetProperty("finish_reason", out var finish) && finish.GetString() == "length") throw new InvalidDataException("Model reply was truncated; increase maxReplyTokens or request a shorter answer.");
-        return choice.GetProperty("message").GetProperty("content").GetString() ?? throw new InvalidDataException("Model returned empty content.");
+        var content=choice.GetProperty("message").GetProperty("content").GetString() ?? throw new InvalidDataException("Model returned empty content.");
+        if(thinkingBudget==0)return content;
+        // An externally configured local server can still put thought tags in content.
+        var end=content.LastIndexOf("</think>",StringComparison.OrdinalIgnoreCase);
+        if(end>=0)content=content[(end+"</think>".Length)..].TrimStart();
+        if(content.Contains("<think",StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The model did not finish its final response.");
+        return content;
     }
     private async Task<IReadOnlyList<ChatMessage>> FitContextAsync(IReadOnlyList<ChatMessage> source,int replyTokens,CancellationToken ct)
     {

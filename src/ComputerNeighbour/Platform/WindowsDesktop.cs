@@ -13,7 +13,7 @@ public sealed class PlatformOptions
 }
 
 /// <summary>Small Windows adapter. All handles are scoped; no hooks, services, or registry writes.</summary>
-public sealed class WindowsDesktop(PlatformOptions options)
+public sealed partial class WindowsDesktop(PlatformOptions options) : IWorkDesktop
 {
     private ulong previousSystemIdle,previousSystemTotal;
     private long previousCpuSampleAt;
@@ -109,6 +109,11 @@ public sealed class WindowsDesktop(PlatformOptions options)
         var sourceWidth = GetSystemMetrics(0);
         var sourceHeight = GetSystemMetrics(1);
         if (sourceWidth <= 0 || sourceHeight <= 0) throw new InvalidOperationException("No interactive desktop is available.");
+        return CapturePng(0, 0, sourceWidth, sourceHeight);
+    }
+
+    private byte[] CapturePng(int left, int top, int sourceWidth, int sourceHeight)
+    {
         var width = Math.Min(sourceWidth, Math.Clamp(options.ScreenMaxWidth, 320, 3840));
         var height = Math.Max(1, (int)Math.Round(sourceHeight * (double)width / sourceWidth));
         var screen = GetDC(IntPtr.Zero);
@@ -124,7 +129,7 @@ public sealed class WindowsDesktop(PlatformOptions options)
             if (previous == IntPtr.Zero || previous == new IntPtr(-1)) throw new Win32Exception();
             SetStretchBltMode(memory, 4); // HALFTONE: readable downscaled text.
             SetBrushOrgEx(memory, 0, 0, IntPtr.Zero);
-            if (!StretchBlt(memory, 0, 0, width, height, screen, 0, 0, sourceWidth, sourceHeight, 0x00CC0020)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not capture the interactive desktop. A locked screen or restricted session cannot be observed.");
+            if (!StretchBlt(memory, 0, 0, width, height, screen, left, top, sourceWidth, sourceHeight, 0x00CC0020)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not capture the interactive desktop. A locked screen or restricted session cannot be observed.");
             SelectObject(memory, previous);
             previous = IntPtr.Zero;
             var pixels = new byte[checked(width * height * 4)];
