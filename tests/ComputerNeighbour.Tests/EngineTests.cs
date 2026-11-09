@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ComputerNeighbour.Application;
 using ComputerNeighbour.Audio;
+using ComputerNeighbour.Browser;
 using ComputerNeighbour.Configuration;
 using ComputerNeighbour.ConsoleInterface;
 using ComputerNeighbour.Context;
@@ -28,6 +29,244 @@ internal static class EngineTests
 
     public static async Task RunAsync(Suite suite)
     {
+        await suite.Case("a natural demand to act rechecks the preceding owner request rather than an unrelated workflow", async root =>
+        {
+            const string original = "Уточни концовку audit-proof.md.";
+            const string followup = "Мне нужно, чтобы ты именно выполнила предыдущую просьбу.";
+            var model = new ReplyReviewModel("The file ends with the signed receipt.",
+                Review("none"),
+                Review("repeat_task", "выполнила предыдущую просьбу", previousEvidence: "Уточни концовку"),
+                Review("owner_task", "Уточни концовку", route: "read_file", target: "audit-proof.md"));
+            await using var f = await Fixture.CreateAsync(root, model);
+            f.Config.TurnProcessing.RefineInput = false;
+            f.Config.Permissions.ReadFiles = true;
+            Directory.CreateDirectory(Path.Combine(root, "documents"));
+            await File.WriteAllTextAsync(Path.Combine(root, "documents", "audit-proof.md"), "The signed receipt.");
+            await f.Engine.RespondAsync(original, "user", false, false, default);
+            var state = f.Memory.Tasks;
+            await f.Memory.SaveTasksAsync(state, state with
+            {
+                Current = new("Open Calculator", "user", WorkflowStatus.Blocked, "Waiting for desktop access.")
+            }, default);
+            await f.Engine.RespondAsync(followup, "user", false, false, default);
+            Check.Equal(original, f.Memory.Tasks.Current!.Request);
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current.Status);
+            Check.Equal("Open Calculator", f.Memory.Tasks.Items.Single().Workflow!.Request);
+            await f.Engine.RespondAsync("/do", "user", false, false, default);
+            Check.Equal(3, model.Reviews.Count);
+            Check.True(f.Output.Lines.Last().Contains("signed receipt"), "Repeated recovery did not report the existing result.");
+        });
+
+        await suite.Case("/do can recover an unrecorded request or act on supplied text without borrowing another speaker's words", async root =>
+        {
+            const string original = "Please dig up public sources about Anna Atkins.";
+            var web = new WorkWebStub("https://example.org/atkins", "https://example.org/full-atkins", "A text about cyanotypes.");
+            var model = new ReplyReviewModel("Anna Atkins made cyanotypes.",
+                Review("owner_task", "dig up public sources", route: "search_web", target: "Anna Atkins"),
+                Review("owner_task", "fetch public material", route: "search_web", target: "cyanotypes"));
+            await using var f = await Fixture.CreateAsync(root, model, web: web);
+            f.Config.Permissions.SearchWeb = true;
+            f.Config.Permissions.ReadWeb = true;
+            await f.Memory.AppendAsync("user", original, "user");
+            await f.Memory.AppendAsync("assistant", "I might do it later.", "Evelyn");
+            await f.Engine.RespondAsync("/do", "guest", false, false, default);
+            Check.Equal(0, web.Queries.Count);
+            await f.Engine.RespondAsync("/do", "user", false, false, default);
+            await f.Memory.AppendAsync("user", "Search for somebody else's details.", "guest");
+            await f.Engine.RespondAsync("/do", "user", false, false, default);
+            Check.Equal(1, web.Queries.Count);
+            await f.Engine.RespondAsync("/do Could you fetch public material about cyanotypes?", "user", false, false, default);
+            Check.True(web.Queries.SequenceEqual(["Anna Atkins", "cyanotypes"]), "The command used text outside its authorized source.");
+            Check.Equal(2, model.Reviews.Count);
+        });
+
+        await suite.Case("/do reports an approved file change without applying it again", async root =>
+        {
+            const string request = "write documents/recovery-proof.md | Original result";
+            var model = new ReplyReviewModel("Nothing else.");
+            await using var f = await Fixture.CreateAsync(root, model);
+            f.Config.Permissions.WriteFiles = true;
+            f.Config.Permissions.ConfirmFileChanges = true;
+            await f.Engine.RespondAsync(request, "user", false, false, default);
+            await f.Engine.ApproveAsync(1, default);
+            await f.Engine.RespondAsync("/do", "user", false, false, default);
+            Check.Equal("Original result", await File.ReadAllTextAsync(Path.Combine(root, "documents", "recovery-proof.md")));
+            Check.Equal(0, model.Reviews.Count);
+            Check.True(f.Output.Lines.Last().Contains("already recorded"), "The command did not use the verified file receipt.");
+        });
+
+        await suite.Case("the reply audit executes a missed public lookup from the exact owner subject", async root =>
+        {
+            const string input = "Будь добра, добудь из сети материалы про Anna Atkins.";
+            const string topic = "Anna Atkins";
+            var model = new ReplyReviewModel("Anna Atkins worked with cyanotypes.",
+                Review("owner_task", "добудь из сети материалы", title: "Cyanotype research", route: "search_web", target: topic));
+            var web = new WorkWebStub("https://example.org/atkins", "https://example.org/full-atkins", "A museum catalogue describes Anna Atkins's cyanotypes.");
+            await using var f = await Fixture.CreateAsync(root, model, web: web);
+            f.Config.Permissions.SearchWeb = true;
+            f.Config.Permissions.ReadWeb = true;
+            await f.Engine.RespondAsync(input, "user", false, false, default);
+            Check.Equal(topic, web.Queries.Single());
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current!.Status);
+            Check.True(f.Output.Lines.Last().Contains("https://example.org/atkins"), "No verified result link was reported.");
+        });
+
+        await suite.Case("an empty tool-mode reply still recovers a local file request", async root =>
+        {
+            const string path = "documents/ledger.md";
+            const string input = "Можешь сообщить, чем заканчивается documents/ledger.md?";
+            var model = new ReplyReviewModel("The ledger ends with the signed receipt.",
+                Review("owner_task", "сообщить, чем заканчивается", title: "Read the ledger", route: "read_file", target: path));
+            await using var f = await Fixture.CreateAsync(root, model);
+            f.Config.Permissions.ReadFiles = true;
+            Directory.CreateDirectory(Path.Combine(root, "documents"));
+            await File.WriteAllTextAsync(Path.Combine(root, path), "The signed receipt.");
+            await f.Engine.RespondAsync(input, "user", false, false, default);
+            Check.Equal(1, model.Reviews.Count);
+            Check.True(model.Reviews[0].Contains("\"writtenReply\":\"\""), "The fallback did not review the empty JSON response.");
+            Check.Equal(TaskExecutionKind.ReadFile, f.Memory.Tasks.Current!.Execution!.Kind);
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current!.Status);
+            Check.True(f.Output.Lines.Last().Contains("signed receipt"), "The file answer was not delivered.");
+        });
+
+        await suite.Case("a deferred recovered task can be resumed after restart without discarding unfinished work", async root =>
+        {
+            const string input = "Later, could you tell me the argument on https://example.org/colour?";
+            const string url = "https://example.org/colour";
+            const string title = "Read the colour article";
+            var web = new WorkWebStub("https://example.org/index", url, "A text about peripheral colour.");
+            await using (var first = await Fixture.CreateAsync(root, new ReplyReviewModel("I can come back to it.",
+                Review("owner_task", "tell me the argument on", title: title, route: "read_web", target: url, defer: true)), web: web))
+            {
+                await first.Engine.RespondAsync(input, "user", false, false, default);
+                Check.True(first.Memory.Tasks.Items.Single().Workflow is not null && web.Reads.Count == 0, "The deferred work ran early or lost its execution route.");
+                var state = first.Memory.Tasks;
+                await first.Memory.SaveTasksAsync(state, state with
+                {
+                    Current = new("Edit documents/draft.md", "user", WorkflowStatus.Blocked, "Waiting for file access.")
+                }, default);
+            }
+            await using var f = await Fixture.CreateAsync(root, new ReplyReviewModel("The article is about peripheral colour."), web: web);
+            f.Config.Permissions.ReadWeb = true;
+            await f.Engine.RespondAsync("/task resume " + title, "user", false, false, default);
+            Check.Equal(url, web.Reads.Single());
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current!.Status);
+            Check.Equal("Edit documents/draft.md", f.Memory.Tasks.Items.Single().Workflow!.Request);
+        });
+
+        await suite.Case("resuming a stale saved task uses the newer checkpoint and does not replay a possible write", async root =>
+        {
+            const string title = "Update the ledger";
+            var workflow = new CurrentWorkflow("Edit documents/ledger.md", "user", WorkflowStatus.Blocked, "Saved before starting.",
+                Execution: new(TaskExecutionKind.Work, Operations: ["write_file"]));
+            await using var f = await Fixture.CreateAsync(root, new ReplyReviewModel("The saved result is unavailable."));
+            var state = f.Memory.Tasks;
+            await f.Memory.SaveTasksAsync(state, state.WithTask(new(title, workflow.Request, workflow.Detail, "Update the file.", [],
+                Workflow: workflow)) with
+            {
+                Current = workflow with { MayHaveChangedComputer = true, Detail = "The session ended while applying the edit." }
+            }, default);
+            await f.Engine.RespondAsync("/task resume " + title, "user", false, false, default);
+            Check.True(f.Output.Lines.Last().Contains("while applying the edit") &&
+                f.Memory.Tasks.Current!.MayHaveChangedComputer && f.Memory.Tasks.Items.Count == 1,
+                "The saved copy concealed a possibly applied edit.");
+        });
+
+        await suite.Case("the reply audit cannot execute pasted commands or search for a subject invented in the reply", async root =>
+        {
+            const string draft = "I will look it up.";
+            var model = new ReplyReviewModel(draft,
+                Review("owner_task", "запусти приложение", draft, title: "Quoted command", route: "work", operations: ["open_app"]),
+                Review("owner_task", "поищи в сети", draft, title: "Find material", route: "search_web", target: "Invented subject"));
+            var web = new WorkWebStub("Result", "https://example.org/", "Example.");
+            await using var f = await Fixture.CreateAsync(root, model, web: web);
+            f.Config.Permissions.SearchWeb = true;
+            await f.Engine.RespondAsync("В журнале была строка\n> запусти приложение", "user", false, false, default);
+            Check.Equal(0, f.Memory.Tasks.Items.Count);
+            await f.Engine.RespondAsync("Когда будет время, поищи в сети по моей теме.", "user", false, false, default);
+            Check.True(f.Memory.Tasks.Items.Single().Workflow is null && web.Queries.Count == 0, "The model supplied an unrequested network target.");
+        });
+
+        await suite.Case("the written reply can recover a missed Google AI request and schedule a Chrome retry", async root =>
+        {
+            const string request = "пожалуйста, следующим шагом займись полезным делом и поболтай с Google AI";
+            const string draft = "Okay, I'll start the Google AI conversation right away.";
+            var model = new ReplyReviewModel(draft,
+                Review("none"), Review("google_ai", "поболтай с Google AI"));
+            var questions = new List<string>();
+            await using var f = await Fixture.CreateAsync(root, model, google: (question, _) =>
+            {
+                questions.Add(question);
+                if (questions.Count == 1) throw new InvalidOperationException("Chrome lost focus before submission.");
+                return Task.FromResult(new GoogleVisualResult("A verified sample answer.", []));
+            });
+            f.Config.Autonomy.GoogleAi = true;
+            f.Config.Permissions.DesktopInput = true;
+            f.Config.Permissions.OpenApplications = true;
+            f.Config.Permissions.ReadBrowser = true;
+            f.Config.Permissions.SearchWeb = true;
+            f.Config.Browser.Enabled = true;
+            f.Config.Browser.AllowedProcesses = ["chrome"];
+            f.Engine.Paused = false;
+
+            await f.Engine.RespondAsync(request, "user", false, false, default);
+            Check.True(model.Reviews.Count == 2 && model.Reviews[1].Contains(draft) && model.Reviews[1].Contains(request),
+                "The review did not see the already written draft.");
+            Check.True(f.Memory.Tasks.Current?.Google is not null && f.Memory.Tasks.Current.Request == request,
+                "The owner's request was not saved as the current workflow.");
+            Check.True(f.Output.Lines.Last().Contains("next task") && !f.Output.Lines.Any(line => line.Contains(draft)),
+                "The draft promise was delivered instead of the saved task status.");
+            var reload = new MemoryStore(root, f.Config.Memory);
+            await reload.InitializeAsync();
+            Check.Equal(f.Memory.Tasks.Current!.Google!.OwnerTurn, reload.Tasks.Current!.Google!.OwnerTurn);
+
+            var now = DateTimeOffset.UtcNow.AddSeconds(1);
+            Check.True(!await f.Engine.TickRequestedGoogleAsync(now, TimeSpan.Zero, default), "Chrome opened before the desktop was idle.");
+            Check.True(await f.Engine.TickRequestedGoogleAsync(now, TimeSpan.FromHours(1), default), "The idle tick did not pick up the saved task.");
+            Check.True(f.Memory.Tasks.Current.Google!.RetryAt > now && f.Memory.Tasks.Current.Status == WorkflowStatus.Blocked,
+                "A pre-submission failure discarded the task.");
+            Check.True(!await f.Engine.TickRequestedGoogleAsync(now.AddMinutes(1), TimeSpan.FromHours(1), default), "Retry ran before its backoff.");
+            Check.True(await f.Engine.TickRequestedGoogleAsync(now.AddMinutes(4), TimeSpan.FromHours(1), default), "The saved task did not retry.");
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current!.Status);
+            Check.True(questions.Count == 2 && questions[0] == questions[1] && !questions[0].Contains(request),
+                "The retry must use the same public question rather than sending the user's message.");
+            Check.True(f.Output.Lines.Last().Contains("A verified sample answer."), "The verified browser result was not reported.");
+        });
+
+        await suite.Case("written reply commitments are saved once and never supply authorization for external work", async root =>
+        {
+            const string draft = "I'll make a reading list about how desktop focus works.";
+            var model = new ReplyReviewModel(draft,
+                Review("personal_task", commitment: draft, title: "Desktop focus reading list", step: "Find a public reference on desktop focus."),
+                Review("personal_task", commitment: draft, existing: 1),
+                Review("owner_task", "talk with Google AI", draft, "Unexpected", "Send a message."));
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Engine.RespondAsync("What interests you about desktop focus?", "user", false, false, default);
+            Check.Equal("Desktop focus reading list", f.Memory.Tasks.Items.Single().Title);
+            await f.Engine.RespondAsync("Do you have a follow-up idea?", "user", false, false, default);
+            Check.Equal(1, f.Memory.Tasks.Items.Count);
+            Check.True(f.Output.Lines.Last().Contains("already in /tasks"), "A duplicate was presented as a new task.");
+            await f.Engine.RespondAsync("That sounds interesting.", "user", false, false, default);
+            Check.Equal(1, f.Memory.Tasks.Items.Count);
+            Check.True(f.Memory.Tasks.Current is null && f.Output.Lines.Last().Contains("haven't started"), "An invented request was treated as authority.");
+        });
+
+        await suite.Case("a missed Google AI promise is recovered on startup without touching Chrome", async root =>
+        {
+            const string request = "Make your next activity a conversation with Gemini about something useful.";
+            const string reply = "I'll start a Google AI conversation.";
+            var model = new ReplyReviewModel(reply, Review("google_ai", "a conversation with Gemini"));
+            await using var f = await Fixture.CreateAsync(root, model,
+                google: (_, _) => throw new InvalidOperationException("Recovery should not open Chrome."));
+            await f.Memory.AppendAsync("user", request, "user", default);
+            await f.Memory.AppendAsync("assistant", reply, f.Config.CharacterName, default);
+            await f.Engine.RestoreMissedGoogleRequestAsync(default);
+            await f.Engine.RestoreMissedGoogleRequestAsync(default);
+            Check.Equal(request, f.Memory.Tasks.Current!.Request);
+            Check.Equal(1, model.Reviews.Count);
+            Check.True(f.Engine.DescribeCurrentWork().Contains("Google AI conversation"), "The recovered request has no visible checkpoint.");
+        });
+
         await suite.Case("incognito uses the current context and discards all experimental state on exit", async root =>
         {
             static string Attitude(string attitude, double trust, ReactionUpdate reaction) => JsonSerializer.Serialize(new CompanionDecision
@@ -340,34 +579,365 @@ internal static class EngineTests
             Check.True(f.Output.Lines.Last().Contains("stopped at search_web"), "The reply claimed success despite rejected actions.");
         });
 
-        await suite.Case("the earlier X request is recovered as priority work and retry shows the same actual draft", async root =>
+        await suite.Case("a long deferred reason and full diary note survive reload and the X task retries stale controls", async root =>
         {
             const string request = "Could you enter x.com and post one of yours notes from my account please";
-            const string excerpt = "A small object can carry the whole weight of an untold story.";
+            const string note = "A small object can carry the whole weight of an untold story. In the next draft, I want to return to the tiny brass key and follow it from the coat pocket to the kitchen table. When the reader sees it again, the object should tell them what the characters have avoided saying.";
             var paths = new PortablePaths(root);
-            await new PersonalLife(paths).SaveAsync(new() { Journal = [new(DateTimeOffset.UtcNow, PersonalGoal.Explore,
-                "Tiny stories", excerpt + " I want to try this in my next draft.", "https://www.craftliterary.com/flash-fiction/")] }, default);
+            var now = DateTimeOffset.UtcNow;
+            var deferred = new PersonalGoalState(PersonalGoal.Sketch, Guid.NewGuid(), now, "An unfinished sketch");
+            var life = new PersonalLifeState { Journal = [new(now, PersonalGoal.Explore, "Tiny stories", note, "https://www.craftliterary.com/flash-fiction/")] };
+            await new PersonalLife(paths).SaveAsync(life.Schedule(deferred, now.AddHours(1), new string('a', 393)), default);
             await using (var original = await Fixture.CreateAsync(root, new ScriptedModel()))
             {
                 foreach (var line in new[] { request, "why you stopped?", "go on and try again", "But you're not doing anything!", "so could do it now?" })
                     await original.Memory.AppendAsync("user", line, "user");
             }
             Uri? opened = null;
-            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openXComposer: uri => opened = uri);
+            var window = new WorkWindow(10, 10, 11, "chrome", "X", 0, 0, 1000, 600);
+            var frame = new WorkFrame(window, [1, 2, 3], 500, 300);
+            var submitAttempts = 0;
+            var desktop = new WorkDesktopStub(frame, frame, frame, frame)
+            {
+                BeforeClick = (_, y) =>
+                {
+                    if (y == 125 && ++submitAttempts == 1) throw new StaleWorkWindowException("The publish control moved before the click.");
+                }
+            };
+            // The model only chooses the editor click. Focus, typing, and the unique submit are driven by observations.
+            var model = new WorkflowModel([], WorkStep("click", new { x = 75, y = 50 }));
+            var reads = 0;
+            var focusReads = 0;
+            var draftReads = 0;
+            var receiptReads = 0;
+            BrowserPage ReadPage()
+            {
+                if (++reads == 1 || desktop.Clicked.Count == 2 && ++receiptReads == 1)
+                    throw new InvalidOperationException("The selected browser window or page changed while reading. Focus the intended page and retry.");
+                var focused = desktop.Clicked.Count > 0 && ++focusReads > 2;
+                var draft = desktop.Typed.Count > 0 && ++draftReads > 1 ? note : null;
+                return new("chrome", "X", "https://x.com/home", desktop.Clicked.Count == 2 ? "Your post was sent." : "Home", false)
+                {
+                    Controls = [new("Post text", 150, 100, true, focused, draft), new("Post", 500, 250, false, false),
+                        new("Post", 40, 200, false, false, IsLink: true)]
+                };
+            }
+            await using var f = await Fixture.CreateAsync(root, model, workDesktop: desktop, openWorkBrowser: uri => opened = uri,
+                readWorkBrowser: (_, _) => Task.FromResult(ReadPage()));
+            f.Config.Permissions.DesktopInput = true;
+            f.Config.Permissions.ScreenCapture = true;
             await f.Engine.RestoreCurrentWorkAsync(default);
             Check.Equal(WorkflowStatus.Draft, f.Memory.Tasks.Current?.Status);
-            Check.True(f.Engine.HasPriorityWork && opened is null, "Startup either lost task priority or opened X without review.");
-            foreach (var line in new[] { "why you stopped?", "go on and try again", "so could do it now?" })
-                await f.Engine.RespondAsync(line, "user", false, false, default);
-            Check.Equal(excerpt, f.Memory.Tasks.Current?.Draft);
-            Check.True(f.Output.Lines.Any(line => line == "[X draft] " + excerpt) && opened is null, "Retry invented or opened a draft.");
-            await f.Engine.RespondAsync("/task compose", "user", false, false, default);
-            Check.Equal("https://x.com/intent/tweet?text=" + Uri.EscapeDataString(excerpt), opened?.AbsoluteUri);
-            Check.Equal(WorkflowStatus.ComposerOpened, f.Memory.Tasks.Current?.Status);
-            Check.True(f.Engine.HasPriorityWork, "Opening a composer was treated as publishing.");
-            await f.Engine.RespondAsync("/task posted https://x.com/example/status/123", "user", false, false, default);
+            Check.True(f.Engine.HasPriorityWork && opened is null, "Startup lost task priority or opened the browser on its own.");
+            var saved = f.Memory.Tasks;
+            Check.True(await f.Memory.SaveTasksAsync(saved, saved with { Current = saved.Current! with { Status = WorkflowStatus.ComposerOpened } }, default),
+                "Could not stage the old manual handoff.");
+            await f.Engine.RestoreCurrentWorkAsync(default);
+            await f.Engine.RespondAsync("why you stopped?", "user", false, false, default);
+            Check.True(opened is null, "Asking for status executed the task.");
+            await f.Engine.RespondAsync("go on and try again", "user", false, false, default);
+            Check.Equal(note, f.Memory.Tasks.Current?.Draft);
+            Check.Equal("https://x.com/", opened?.AbsoluteUri);
+            Check.Equal(note, desktop.Typed.Single());
+            Check.Equal(1, model.Calls.Count);
+            Check.True(desktop.Clicked.SequenceEqual([(150, 100), (500, 250)]), "The editor and final button were not clicked in order.");
+            Check.Equal(2, submitAttempts);
+            Check.True(f.Output.Lines.Any(line => line.Contains("check it again automatically")), "The transient failure was not retried in the task.");
             Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
+            var reloaded = new MemoryStore(root, f.Config.Memory);
+            await reloaded.InitializeAsync();
+            Check.Equal(note, reloaded.Tasks.Current?.Draft);
             Check.True(!f.Engine.HasPriorityWork, "Completed work still blocked personal projects.");
+            await f.Engine.RespondAsync("so could do it now?", "user", false, false, default);
+            Check.Equal(2, desktop.Clicked.Count);
+            Check.True(f.Output.Lines.Last().Contains("The page confirmed it."), "A follow-up lost the saved confirmation.");
+        });
+
+        await suite.Case("a direct note publication uses the named website and never repeats an unconfirmed submit", async root =>
+        {
+            const string request = "Please post one of your notes on example.test";
+            const string note = "The quiet part of the story carried all its weight.";
+            await new PersonalLife(new PortablePaths(root)).SaveAsync(new() { Journal = [new(DateTimeOffset.UtcNow, PersonalGoal.Explore,
+                "Fiction", note, "https://www.craftliterary.com/flash-fiction/")] }, default);
+            var frame = new WorkFrame(new(10, 10, 11, "chrome", "Example", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame);
+            var launches = new List<Uri>();
+            var model = new ScriptedModel();
+            Task<BrowserPage> ReadPage(WorkWindow _, CancellationToken ct) => Task.FromResult(new BrowserPage("chrome", "Example", "https://example.test/", "Home", false)
+            {
+                Controls = [new("Post text", 150, 100, true, true, desktop.Typed.LastOrDefault()), new("Publish", 250, 125, false, false)]
+            });
+            await using (var f = await Fixture.CreateAsync(root, model, workDesktop: desktop, openWorkBrowser: launches.Add, readWorkBrowser: ReadPage))
+            {
+                f.Config.Permissions.DesktopInput = f.Config.Permissions.ScreenCapture = true;
+                await f.Engine.RespondAsync(request, "user", false, false, default);
+                Check.Equal("https://example.test/", launches.Single().AbsoluteUri);
+                Check.Equal(note, desktop.Typed.Single());
+                Check.Equal(WorkflowStatus.Blocked, f.Memory.Tasks.Current?.Status);
+                Check.True(f.Memory.Tasks.Current?.MayHaveChangedComputer == true, "The submit boundary was not saved.");
+            }
+            await using var restarted = await Fixture.CreateAsync(root, new ScriptedModel(), workDesktop: desktop,
+                openWorkBrowser: launches.Add, readWorkBrowser: ReadPage);
+            restarted.Config.Permissions.DesktopInput = restarted.Config.Permissions.ScreenCapture = true;
+            await restarted.Engine.RestoreCurrentWorkAsync(default);
+            await restarted.Engine.RespondAsync("try again", "user", false, false, default);
+            await restarted.Engine.RespondAsync(request, "user", false, false, default);
+            Check.Equal(1, desktop.Clicked.Count);
+            Check.Equal(1, launches.Count);
+            Check.True(restarted.Output.Lines.Last().Contains("couldn't verify"), "Retry reported an unconfirmed publication as complete.");
+        });
+
+        await suite.Case("a writing invitation waits for bilingual approval, then posts the actual excerpt as a new task", async root =>
+        {
+            const string excerpt = "The space between words is where meaning lives.";
+            Directory.CreateDirectory(Path.Combine(root, PersonalWriting.Folder));
+            await File.WriteAllTextAsync(Path.Combine(root, PersonalWriting.Folder, "The Space Between Words.md"), "# The Space Between Words\n\n" + excerpt);
+            var frame = new WorkFrame(new(10, 10, 11, "chrome", "X", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame);
+            var launches = new List<Uri>();
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), workDesktop: desktop, openWorkBrowser: launches.Add,
+                readWorkBrowser: (_, _) => Task.FromResult(new BrowserPage("chrome", "X", "https://x.com/home",
+                    desktop.Clicked.Count > 0 ? "Your post was sent." : "Home", false)
+                { Controls = [new("Post text", 150, 100, true, true, desktop.Typed.LastOrDefault()), new("Post", 250, 125, false, false)] }));
+            f.Config.Permissions.DesktopInput = f.Config.Permissions.ScreenCapture = true;
+            var before = f.Memory.Tasks;
+            var earlier = new CurrentWorkflow("Post one of your notes on x.com", "user", WorkflowStatus.Finished,
+                "The earlier reading note was posted.", true, "An unrelated earlier reading note.");
+            Check.True(await f.Memory.SaveTasksAsync(before, before with { Current = earlier, BrowserPublication = earlier }, default), "Couldn't stage the earlier note.");
+            await f.Engine.RespondAsync("would you like to post something from your last writing to x.com?", "user", false, false, default);
+            Check.Equal(0, launches.Count);
+            Check.Equal(earlier, f.Memory.Tasks.Current);
+            Check.True(f.Output.Lines.Last().Contains("The Space Between Words"), "The offer invented or lost the local title.");
+            await f.Engine.RespondAsync("Отлично, тогда можешь запостить", "user", false, false, default);
+            Check.Equal("https://x.com/", launches.Single().AbsoluteUri);
+            Check.Equal(excerpt, desktop.Typed.Single());
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
+            await f.Engine.RespondAsync("да, попробуй еще раз", "user", false, false, default);
+            Check.Equal(1, desktop.Clicked.Count);
+        });
+
+        await suite.Case("restart recovers the authorized writing after unsupported chat claims and preserves the named piece", async root =>
+        {
+            const string excerpt = "The space between words is where meaning lives.";
+            const string unsupported = "I've just sent it out to x.com as \"The Space Between Words\".";
+            Directory.CreateDirectory(Path.Combine(root, PersonalWriting.Folder));
+            await File.WriteAllTextAsync(Path.Combine(root, PersonalWriting.Folder, "The Space Between Words.md"), excerpt);
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), openWorkBrowser: _ => throw new InvalidOperationException("Startup must not publish."));
+            await f.Memory.AppendAsync("user", "would you like to post something from your last writing to x.com?", "user");
+            await f.Memory.AppendAsync("assistant", "I'd share the one about the space between words.", "Evelyn");
+            await f.Memory.AppendAsync("user", "Отлично, тогда можешь запостить", "user");
+            await f.Memory.AppendAsync("user", "да, попробуй еще раз", "user");
+            await f.Memory.AppendAsync("assistant", unsupported, "Evelyn");
+            await f.Memory.AppendAsync("user", "но ты ничего не запостила", "user");
+            await File.WriteAllTextAsync(Path.Combine(root, PersonalWriting.Folder, "A Newer Story.md"), "This is a different story written later.");
+            await f.Engine.RestoreCurrentWorkAsync(default);
+            Check.Equal(WorkflowStatus.Draft, f.Memory.Tasks.Current?.Status);
+            Check.Equal(excerpt, f.Memory.Tasks.Current?.Draft);
+            Check.True(ReplyQuality.ClaimsComputerAction(unsupported), "Ordinary chat still allows the false publication claim.");
+            Check.True(!ReplyQuality.ClaimsComputerAction("I'd like to share that piece on X."), "A preference was treated as an action claim.");
+        });
+
+        await suite.Case("a fresh Russian writing request executes and a polite confirmation retries the same saved excerpt", async root =>
+        {
+            const string request = "Можешь опубликовать какую-то запись из своей последней работы на x.com?";
+            const string excerpt = "Even the ordinary morning left a trace of gold.";
+            Directory.CreateDirectory(Path.Combine(root, PersonalWriting.Folder));
+            var file = Path.Combine(root, PersonalWriting.Folder, "Gold in the Morning.md");
+            await File.WriteAllTextAsync(file, "# Gold in the Morning\n\n" + excerpt);
+            var frame = new WorkFrame(new(10, 10, 11, "chrome", "X", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame);
+            var launches = new List<Uri>();
+            await using var f = await Fixture.CreateAsync(root, new ScriptedModel(), workDesktop: desktop,
+                openWorkBrowser: uri =>
+                {
+                    launches.Add(uri);
+                    if (launches.Count == 1) throw new System.ComponentModel.Win32Exception("The test browser was unavailable.");
+                },
+                readWorkBrowser: (_, _) => Task.FromResult(new BrowserPage("chrome", "X", "https://x.com/home",
+                    desktop.Clicked.Count > 0 ? "Your post was sent." : "Home", false)
+                { Controls = [new("Post text", 150, 100, true, true, desktop.Typed.LastOrDefault()), new("Post", 250, 125, false, false)] }));
+            f.Config.Permissions.DesktopInput = f.Config.Permissions.ScreenCapture = true;
+            var state = f.Memory.Tasks;
+            var old = new CurrentWorkflow("Post an excerpt from your last writing on x.com", "user", WorkflowStatus.Cancelled,
+                "You cancelled the task.", Draft: "This earlier story was cancelled.");
+            Check.True(await f.Memory.SaveTasksAsync(state, state with { Current = old, BrowserPublication = old }, default), "Couldn't stage the cancelled task.");
+            await f.Engine.RespondAsync(request, "user", false, false, default);
+            Check.Equal("https://x.com/", launches.Single().AbsoluteUri);
+            Check.Equal(request, f.Memory.Tasks.Current?.Request);
+            Check.Equal(excerpt, f.Memory.Tasks.Current?.Draft);
+            Check.Equal(WorkflowStatus.Blocked, f.Memory.Tasks.Current?.Status);
+            Check.Equal(0, desktop.Clicked.Count);
+            Check.True(f.Output.Lines.Last().Contains("The test browser was unavailable."), "The first attempt did not report its real failure.");
+
+            await File.WriteAllTextAsync(file, "A later revision changed the opening sentence.");
+            await f.Engine.RespondAsync("Да, пожалуйста", "user", false, false, default);
+            Check.Equal(2, launches.Count);
+            Check.Equal(excerpt, desktop.Typed.Single());
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
+            await f.Engine.RespondAsync("Да, пожалуйста", "user", false, false, default);
+            Check.Equal(1, desktop.Clicked.Count);
+            Check.Equal(2, launches.Count);
+
+            f.Config.Permissions.DesktopInput = false;
+            await f.Engine.RespondAsync("Поделись отрывком из своего последнего рассказа на сайте example.test", "user", false, false, default);
+            Check.Equal("A later revision changed the opening sentence.", f.Memory.Tasks.Current?.Draft);
+            Check.Equal(WorkflowStatus.Blocked, f.Memory.Tasks.Current?.Status);
+            Check.True(ReplyQuality.ClaimsComputerAction("I opened the draft file for The Space Between Words."), "Chat could still claim it opened a draft.");
+            Check.True(ReplyQuality.ClaimsComputerAction("I clicked publish now so it shows up."), "Chat could still claim it pressed Publish.");
+        });
+
+        await suite.Case("semantic publication understands a paraphrase and uses the explicitly named site", async root =>
+        {
+            const string request = "Эвелин, отправь в открытый мир через x.com пару строк из того, что ты написала совсем недавно.";
+            const string excerpt = "The first light caught on the edge of the page.";
+            Directory.CreateDirectory(Path.Combine(root, PersonalWriting.Folder));
+            await File.WriteAllTextAsync(Path.Combine(root, PersonalWriting.Folder, "First Light.md"), excerpt);
+            var route = new PublicationRoutingModel(PublicationDecision("publish", "writing", "other.test", "отправь в открытый мир"),
+                PublicationDecision("publish", "writing", "x.com", "отправь в открытый мир"));
+            var launches = new List<Uri>();
+            await using var f = await Fixture.CreateAsync(root, route, openWorkBrowser: launches.Add);
+            await f.Engine.RespondAsync(request, "user", false, false, default);
+            Check.True(f.Memory.Tasks.Current is null && launches.Count == 0, "The inferred destination overrode the user's words.");
+            await f.Engine.RespondAsync(request, "user", false, false, default);
+            Check.Equal(excerpt, f.Memory.Tasks.Current?.Draft);
+            Check.Equal(WorkflowStatus.Blocked, f.Memory.Tasks.Current?.Status);
+            Check.True(f.Memory.Tasks.Current?.Request.EndsWith("on x.com", StringComparison.Ordinal) == true, "The explicit destination was lost.");
+        });
+
+        await suite.Case("semantic consent resumes a saved preview and keeps the exact excerpt across a restart", async root =>
+        {
+            const string excerpt = "The first light caught on the edge of the page.";
+            Directory.CreateDirectory(Path.Combine(root, PersonalWriting.Folder));
+            var file = Path.Combine(root, PersonalWriting.Folder, "First Light.md");
+            await File.WriteAllTextAsync(file, excerpt);
+            var launches = new List<Uri>();
+            await using (var first = await Fixture.CreateAsync(root,
+                new PublicationRoutingModel(PublicationDecision("offer", "writing", "x.com", "захотелось бы поделиться")),
+                openWorkBrowser: launches.Add))
+            {
+                await first.Engine.RespondAsync("А какими строчками из свежего рассказа тебе захотелось бы поделиться на x.com?", "user", false, false, default);
+                Check.True(first.Memory.Tasks.Current is null && launches.Count == 0, "A suggestion published without approval.");
+                Check.Equal(excerpt, first.Memory.Tasks.PublicationOffer?.Draft);
+            }
+            await File.WriteAllTextAsync(file, "A revision changed the beginning after the offer.");
+            var frame = new WorkFrame(new(10, 10, 11, "chrome", "X", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame);
+            var route = new PublicationRoutingModel(PublicationDecision("approve", "none", "", "отправляй"),
+                PublicationDecision("status", "none", "", "дошло"));
+            await using var restarted = await Fixture.CreateAsync(root, route, workDesktop: desktop, openWorkBrowser: launches.Add,
+                readWorkBrowser: (_, _) => Task.FromResult(new BrowserPage("chrome", "X", "https://x.com/home",
+                    desktop.Clicked.Count > 0 ? "Your post was sent." : "Home", false)
+                { Controls = [new("Post text", 150, 100, true, true, desktop.Typed.LastOrDefault()), new("Post", 250, 125, false, false)] }));
+            restarted.Config.Permissions.DesktopInput = restarted.Config.Permissions.ScreenCapture = true;
+            await restarted.Engine.RestoreCurrentWorkAsync(default);
+            await restarted.Engine.RespondAsync("Звучит хорошо, отправляй.", "user", false, false, default);
+            Check.Equal("https://x.com/", launches.Single().AbsoluteUri);
+            Check.Equal(excerpt, desktop.Typed.Single());
+            Check.Equal(WorkflowStatus.Finished, restarted.Memory.Tasks.Current?.Status);
+            Check.True(restarted.Memory.Tasks.PublicationOffer is null, "Approval left an offer that could be sent again.");
+            await restarted.Engine.RespondAsync("И всё-таки дошло?", "user", false, false, default);
+            Check.Equal(1, desktop.Clicked.Count);
+            Check.True(restarted.Output.Lines.Last().Contains("The page confirmed it."), "Status did not report the observed receipt.");
+        });
+
+        await suite.Case("a signed follow-up uses the recorded destination after intervening chat and selects a different note", async root =>
+        {
+            const string previousText = "The earlier note was posted here. It was about the sound of pages turning in a quiet library.";
+            const string note = "The lantern was still warm when I set it down.";
+            var now = DateTimeOffset.UtcNow;
+            await new PersonalLife(new PortablePaths(root)).SaveAsync(new() { Journal = [
+                new(now, PersonalGoal.Explore, "Lanterns", note, "https://example.com/lanterns"),
+                new(now, PersonalGoal.Explore, "Libraries", previousText, "https://example.com/libraries")] }, default);
+            var model = new PublicationRoutingModel(PublicationDecision("publish", "same", "", "отправь другую заметку",
+                another: true, siteReference: "по прежнему адресу", signatureEvidence: "оставь своё имя в конце"));
+            var frame = new WorkFrame(new(10, 10, 11, "chrome", "Notes", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame);
+            var launches = new List<Uri>();
+            await using var f = await Fixture.CreateAsync(root, model, workDesktop: desktop, openWorkBrowser: launches.Add,
+                readWorkBrowser: (_, _) => Task.FromResult(new BrowserPage("chrome", "Notes", "https://notes.example/home",
+                    desktop.Clicked.Count > 0 ? "Your post was sent." : "Home", false)
+                { Controls = [new("Post text", 150, 100, true, true, desktop.Typed.LastOrDefault()), new("Post", 250, 125, false, false)] }));
+            f.Config.CharacterName = "Lyra";
+            f.Config.Permissions.DesktopInput = f.Config.Permissions.ScreenCapture = true;
+            await f.Memory.AppendAsync("user", "Post one of your notes on notes.example", "user");
+            var posted = new CurrentWorkflow("Post one of your notes on notes.example", "user", WorkflowStatus.Finished, "The page confirmed it.",
+                true, previousText, f.Memory.Recent.Last().At);
+            var before = f.Memory.Tasks;
+            Check.True(await f.Memory.SaveTasksAsync(before, before with { Current = posted, BrowserPublication = posted }, default), "Couldn't stage the prior publication.");
+            await f.Memory.AppendAsync("user", "Спасибо, получилось!", "user");
+            await f.Engine.RespondAsync("Теперь отправь другую заметку по прежнему адресу, оставь своё имя в конце.", "user", false, false, default);
+            Check.Equal("https://notes.example/", launches.Single().AbsoluteUri);
+            Check.Equal(note + " — Lyra", desktop.Typed.Single());
+            Check.Equal(note + " — Lyra", f.Memory.Tasks.Current?.Draft);
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
+        });
+
+        await suite.Case("startup restores an unrecorded signed request from the owner's conversation without opening the browser", async root =>
+        {
+            const string postedText = "That was the previous note, which had enough words to fit a different one with a signature.";
+            const string note = "The light across the page looked like water.";
+            const string request = "можешь опубликовать еще одну запись там же, только на этот раз в конце уточни что это от тебя, то есть сделай свою подпись";
+            var now = DateTimeOffset.UtcNow;
+            await new PersonalLife(new PortablePaths(root)).SaveAsync(new() { Journal = [
+                new(now, PersonalGoal.Explore, "Water", note, "https://example.com/water"),
+                new(now, PersonalGoal.Explore, "Previous", postedText, "https://example.com/previous")] }, default);
+            var model = new PublicationRoutingModel(PublicationDecision("none", "none", "", ""),
+                PublicationDecision("publish", "same", "", "опубликовать еще одну запись", another: true, siteReference: "там же", signatureEvidence: "сделай свою подпись"),
+                PublicationDecision("retry", "none", "", "можешь это сделать сейчас"));
+            await using var f = await Fixture.CreateAsync(root, model, openWorkBrowser: _ => throw new InvalidOperationException("Startup must not open a browser."));
+            await f.Memory.AppendAsync("user", "Post one of your notes on x.com", "user");
+            var posted = new CurrentWorkflow("Post one of your notes on x.com", "user", WorkflowStatus.Finished, "The page confirmed it.",
+                true, postedText, f.Memory.Recent.Last().At);
+            var before = f.Memory.Tasks;
+            Check.True(await f.Memory.SaveTasksAsync(before, before with { Current = posted, BrowserPublication = posted }, default), "Couldn't stage the prior publication.");
+            await f.Memory.AppendAsync("user", "Спасибо!", "user");
+            await f.Memory.AppendAsync("user", request, "user");
+            await f.Memory.AppendAsync("assistant", "I'll type my name after the title.", "Evelyn");
+            await f.Memory.AppendAsync("user", "да, можешь это сделать сейчас?", "user");
+            await f.Engine.RestoreCurrentWorkAsync(default);
+            Check.Equal(WorkflowStatus.Draft, f.Memory.Tasks.Current?.Status);
+            Check.Equal(note + " — Evelyn", f.Memory.Tasks.Current?.Draft);
+            Check.Equal(f.Memory.Recent.Last().At, f.Memory.Tasks.Current?.PublicationAnchor);
+        });
+
+        await suite.Case("publication intake resumes the same signed draft after intervening chat and repeated instructions", async root =>
+        {
+            const string draft = "The recorded note is still waiting. — Evelyn";
+            const string repeat = "можешь опубликовать еще одну запись там же, только на этот раз в конце уточни что это от тебя, то есть сделай свою подпись";
+            var model = new PublicationRoutingModel(
+                PublicationDecision("publish", "same", "", "опубликовать еще одну запись", another: true,
+                    siteReference: "там же", signatureEvidence: "сделай свою подпись"),
+                PublicationDecision("retry", "none", "", "publish it"), PublicationDecision("approve", "none", "", "do that"));
+            var frame = new WorkFrame(new(10, 10, 11, "chrome", "Notes", 0, 0, 500, 300), [1, 2, 3], 500, 300);
+            var desktop = new WorkDesktopStub(frame, frame);
+            var launches = new List<Uri>();
+            await using var f = await Fixture.CreateAsync(root, model, workDesktop: desktop,
+                openWorkBrowser: uri =>
+                {
+                    launches.Add(uri);
+                    if (launches.Count < 3) throw new System.ComponentModel.Win32Exception("The test browser was unavailable.");
+                },
+                readWorkBrowser: (_, _) => Task.FromResult(new BrowserPage("chrome", "Notes", "https://notes.example/home",
+                    desktop.Clicked.Count > 0 ? "Your post was sent." : "Home", false)
+                { Controls = [new("Post text", 150, 100, true, true, desktop.Typed.LastOrDefault()), new("Post", 250, 125, false, false)] }));
+            f.Config.Permissions.DesktopInput = f.Config.Permissions.ScreenCapture = true;
+            await f.Memory.AppendAsync("user", "Can you post another note with your name at the end?", "user");
+            var saved = new CurrentWorkflow("Post another of your notes on notes.example", "user", WorkflowStatus.Draft, "The note is ready.",
+                Draft: draft, PublicationAnchor: f.Memory.Recent.Last().At, SignPublication: true);
+            var state = f.Memory.Tasks;
+            Check.True(await f.Memory.SaveTasksAsync(state, state with { Current = saved, BrowserPublication = saved }, default), "Couldn't stage the pending draft.");
+            await f.Memory.AppendAsync("user", "Good, that is the one I meant.", "user");
+            await f.Memory.AppendAsync("assistant", "I'll type my name after the title.", "Evelyn");
+
+            await f.Engine.RespondAsync(repeat, "user", false, false, default);
+            Check.Equal("https://notes.example/", launches.Single().AbsoluteUri);
+            Check.Equal(draft, f.Memory.Tasks.Current?.Draft);
+            await f.Engine.RespondAsync("go ahead and publish it", "user", false, false, default);
+            Check.Equal(2, launches.Count);
+            await f.Engine.RespondAsync("do that", "user", false, false, default);
+            Check.Equal(draft, desktop.Typed.Single());
+            Check.Equal(1, desktop.Clicked.Count);
+            Check.Equal(WorkflowStatus.Finished, f.Memory.Tasks.Current?.Status);
         });
 
         await suite.Case("a missing foreground window stops once and the same task resumes on a follow-up", async root =>
@@ -1405,6 +1975,35 @@ internal static class EngineTests
     private static string WorkStep(string? tool = null, object? args = null, string reply = "", string[]? plan = null) =>
         JsonSerializer.Serialize(new { plan = plan ?? [], action = tool is null ? null : new { tool, args }, reply });
 
+    private static string PublicationDecision(string action, string material, string site, string evidence,
+        bool another = false, string siteReference = "", string signatureEvidence = "") =>
+        JsonSerializer.Serialize(new { action, material, site, siteReference, evidence, another, signatureEvidence });
+
+    private static string Review(string action, string evidence = "", string commitment = "", string title = "", string step = "", int existing = 0,
+        string route = "note", string target = "", string[]? operations = null, bool defer = false, string previousEvidence = "") =>
+        JsonSerializer.Serialize(new { action, evidence, previousEvidence, commitment, title, nextStep = step, existing, route, target, operations, defer });
+
+    private sealed class ReplyReviewModel(string draft, params string[] reviews) : IChatModel, IReplyTaskModel
+    {
+        internal List<string> Reviews { get; } = [];
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct) =>
+            Task.FromResult(json ? Decision(speak: false) : draft);
+        public Task<string> ReviewTaskAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct)
+        {
+            Reviews.Add(messages[^1].Text);
+            return Task.FromResult(reviews[Reviews.Count - 1]);
+        }
+    }
+
+    private sealed class PublicationRoutingModel(params string[] interpretations) : IChatModel, IPublicationIntentModel
+    {
+        private int next;
+        public Task<string> InterpretPublicationAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) =>
+            Task.FromResult(interpretations[next++]);
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct) =>
+            Task.FromResult(json ? Decision() : "I couldn't verify a publication request.");
+    }
+
     private sealed class WorkflowModel(string[] routes, params string[] responses) : IChatModel, ITurnContextModel, IDeepAnalysisModel
     {
         private int route;
@@ -1445,6 +2044,7 @@ internal static class EngineTests
         public List<(string Executable, string Path)> OpenedDocuments { get; } = [];
         public int Captures => observation;
         public bool FailCurrentWindow { get; set; }
+        public Action<int, int>? BeforeClick { get; init; }
         public WorkWindow CurrentWindow() => FailCurrentWindow
             ? throw new InvalidOperationException("Bring the application to the foreground.") : frames[observation].Window;
         public int? Launch(string executable)
@@ -1465,7 +2065,11 @@ internal static class EngineTests
         }
         public void Focus(string executable, int? launchedProcess = null) => throw new InvalidOperationException("Unexpected focus.");
         public void Restore(WorkWindow window) => throw new InvalidOperationException("Unexpected restore.");
-        public void Click(WorkFrame frame, int x, int y) => Clicked.Add(frame.ScreenPoint(x, y));
+        public void Click(WorkFrame frame, int x, int y)
+        {
+            BeforeClick?.Invoke(x, y);
+            Clicked.Add(frame.ScreenPoint(x, y));
+        }
         public void Type(WorkFrame frame, string text) => Typed.Add(text);
         public void Key(WorkFrame frame, string key) => Keys.Add(key);
         public void Scroll(WorkFrame frame, int ticks) => throw new InvalidOperationException("Unexpected scroll.");
@@ -1534,7 +2138,9 @@ internal static class EngineTests
         public required AudioService Audio { get; init; }
         public required WeatherService Weather { get; init; }
         public required CapturingOutput Output { get; init; }
-        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null,IWorkDesktop? workDesktop=null,IWebResearch? web=null,Action<Uri>? openXComposer=null)
+        public static async Task<Fixture> CreateAsync(string root, IChatModel model,IOpenDocumentReader? openDocuments=null,Func<byte[]>? capture=null,Func<string,bool>? openSketch=null,IWorkDesktop? workDesktop=null,IWebResearch? web=null,
+            Action<Uri>? openWorkBrowser = null, Func<WorkWindow, CancellationToken, Task<BrowserPage>>? readWorkBrowser = null,
+            Func<string, CancellationToken, Task<GoogleVisualResult>>? google = null)
         {
             var paths = new PortablePaths(root);
             var config = new AppConfig();
@@ -1553,7 +2159,9 @@ internal static class EngineTests
             return new Fixture
             {
                 Config = config, Memory = memory, Audio = audio, Weather = weather, Output = output,
-                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,webResearch:web,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch) { Paused = true, WorkDesktopOverride = workDesktop, OpenXComposerOverride = openXComposer }
+                Engine = new CompanionEngine(paths, config, model, memory, emotion, new WindowsDesktop(config.Desktop), audio, output, weather,webResearch:web,openDocuments:openDocuments,captureScreen:capture,openSketch:openSketch)
+                { Paused = true, WorkDesktopOverride = workDesktop, OpenWorkBrowserOverride = openWorkBrowser, ReadWorkBrowserOverride = readWorkBrowser,
+                    PersonalGoogleOverride = google }
             };
         }
         public async ValueTask DisposeAsync()

@@ -39,8 +39,21 @@ public sealed partial class CompanionEngine
         _ => null
     };
 
-    private static bool ActivityAvailable(PersonalLifeState state, PersonalGoal goal, DateTimeOffset now) =>
-        !state.Breaks.Any(item => item.Kind == ActivityFor(goal) && item.Until > now);
+    private bool ActivityAvailable(PersonalLifeState state, PersonalGoal goal, DateTimeOffset now)
+    {
+        var kind = ActivityFor(goal);
+        return !state.Breaks.Any(item => item.Kind == kind && item.Until > now) &&
+            (kind != ActivityKind.Writing || WritingCooldownRemaining(state, now) == TimeSpan.Zero);
+    }
+
+    private TimeSpan WritingCooldownRemaining(PersonalLifeState state, DateTimeOffset now)
+    {
+        if (config.Autonomy.WritingCooldownMinutes == 0 ||
+            Array.FindLast(state.Journal, note => ActivityFor(note.Goal) == ActivityKind.Writing) is not { } last)
+            return TimeSpan.Zero;
+        var remaining = TimeSpan.FromMinutes(config.Autonomy.WritingCooldownMinutes) - (now - last.At);
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
 
     private PersonalLifeState TrackActivity(PersonalLifeState state, PersonalGoal goal, double seconds)
     {
@@ -172,7 +185,8 @@ public sealed partial class CompanionEngine
         config.Browser.AllowedProcesses.Any(name => WindowsDesktop.IsWorkApplication("chrome", name));
 
     private bool GoogleReady(PersonalLifeState state, DateTimeOffset now, TimeSpan? idle) =>
-        GoogleConfigured && idle >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds) && now >= state.GoogleAfter;
+        GoogleConfigured && memory.Tasks.Current is not { Pending: true, Google: not null } && memory.Tasks.QueuedGoogle is null &&
+        idle >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds) && now >= state.GoogleAfter;
 
     internal async Task<string> DescribePersonalWebAsync(DateTimeOffset now, CancellationToken ct)
     {
@@ -180,7 +194,9 @@ public sealed partial class CompanionEngine
         await life.LoadAsync(ct);
         var state = life.State;
         var idle = OperatingSystem.IsWindows() ? desktop.GetInteractiveIdleTime() : null;
-        var google = !GoogleConfigured ? "waiting for browser and desktop permissions" :
+        var google = memory.Tasks.Current is { Pending: true, Google: not null } task ? task.Detail.TrimEnd('.') :
+            memory.Tasks.QueuedGoogle is not null ? "conversation saved behind the current task" :
+            !GoogleConfigured ? "waiting for browser and desktop permissions" :
             now < state.GoogleAfter ? $"background cooldown until {state.GoogleAfter.ToLocalTime():HH:mm}" :
             idle < TimeSpan.FromSeconds(config.Autonomy.IdleSeconds) || idle is null ? $"waiting for {config.Autonomy.IdleSeconds} seconds of desktop idle" :
             "eligible for a background question";

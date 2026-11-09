@@ -47,7 +47,7 @@ public sealed partial class CompanionEngine
         if (currentThought is {} thought) thought.Route = "work_task";
         var reply = await HandleWorkTaskAsync(state, command, ct);
         lastTurnWasWorkTask = true;
-        await ReplyToTaskAsync(reply, ct);
+        if (reply is not null) await ReplyToTaskAsync(reply, ct);
         return true;
     }
 
@@ -58,7 +58,7 @@ public sealed partial class CompanionEngine
         await SpeakAsync(reply, ct);
     }
 
-    private async Task<string> HandleWorkTaskAsync(WorkTaskState state, WorkTaskCommand command, CancellationToken ct)
+    private async Task<string?> HandleWorkTaskAsync(WorkTaskState state, WorkTaskCommand command, CancellationToken ct)
     {
         switch (command.Action)
         {
@@ -102,6 +102,7 @@ public sealed partial class CompanionEngine
         switch (command.Action)
         {
             case "resume":
+                if (task.Workflow is { } workflow) return await ResumeSavedWorkflowAsync(task, workflow, ct);
                 return state.ActiveTitle == task.Title || await memory.SaveTasksAsync(state, state with { ActiveTitle = task.Title }, ct)
                     ? DescribeWorkTask(task) : TaskChanged;
             case "attach":
@@ -169,7 +170,7 @@ public sealed partial class CompanionEngine
             .Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxTaskReferences).ToArray();
         var task = new WorkTask(existing?.Title ?? title, goal.Length > 0 ? goal : existing?.Goal ?? "",
             progress.Length > 0 ? progress : existing?.Progress ?? "",
-            nextStep.Length > 0 ? nextStep : existing?.NextStep ?? "", references, existing?.ReminderAt);
+            nextStep.Length > 0 ? nextStep : existing?.NextStep ?? "", references, existing?.ReminderAt, existing?.Workflow);
         return await memory.SaveTasksAsync(state, state.WithTask(task), ct)
             ? "Saved the checkpoint for " + DescribeWorkTask(task) : TaskChanged;
     }

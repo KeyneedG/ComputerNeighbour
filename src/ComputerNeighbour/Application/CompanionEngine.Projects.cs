@@ -21,20 +21,22 @@ public sealed partial class CompanionEngine
         return goal with { Project = project, Facts = facts };
     }
 
-    private async Task<bool> TryQueueDiaryTitlesAsync(string input, CancellationToken ct)
+    private async Task<bool> TryQueueDiaryTitlesAsync(string input, CancellationToken ct, bool reviewed = false)
     {
         var direct = WorkRequest.WithoutQuotedText(input);
         var request = Tools.IntentRouter.CommandText(direct, config.CharacterName);
         const RegexOptions ignore = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
-        if (!Regex.IsMatch(request, @"\b(?:diar(?:y|ies)|дневник\p{L}*)\b", ignore) ||
+        if (Regex.IsMatch(request, @"\b(?:не\s+(?:переименовывай|называй)|(?:don't|do not)\s+(?:rename|name))\b", ignore))
+            return false;
+        if (!reviewed && (!Regex.IsMatch(request, @"\b(?:diar(?:y|ies)|дневник\p{L}*)\b", ignore) ||
             !Regex.IsMatch(request, @"\b(?:переимен\p{L}*|называ\p{L}*|назван\p{L}*|titles?|rename|names?)\b", ignore) ||
             !(Regex.IsMatch(direct, @"\b(?:пожалуйста|мож\p{L}*|могл\p{L}*\s+бы|переименуй|называй|please|(?:can|could|would)\s+you)\b", ignore) ||
-                Regex.IsMatch(request, @"^(?:rename|name)\b", ignore)) ||
-            Regex.IsMatch(request, @"\b(?:не\s+(?:переименовывай|называй)|(?:don't|do not)\s+(?:rename|name))\b", ignore))
+                Regex.IsMatch(request, @"^(?:rename|name)\b", ignore))))
             return false;
         await InitializePersonalLifeAsync(ct);
         if (!AutonomyEnabled || !CanWritePersonalEntries() || !config.Permissions.ReadFiles)
         {
+            if (reviewed) return false;
             await DeliverReplyAsync("I can give my older entries titles in a regular session with access to my writing folder.", false, ct);
             return true;
         }
@@ -48,7 +50,11 @@ public sealed partial class CompanionEngine
         string reply;
         if (pending) reply = "I already have the title change on my list. I'll base the new name on the text.";
         else if (source is null) reply = "My new diary pieces get descriptive titles. The writing folder has no older hex-named entries left to rename.";
-        else if (!HasQueueRoom(state)) reply = "My list is full at the moment. The older entries can be picked up between projects.";
+        else if (!HasQueueRoom(state))
+        {
+            if (reviewed) return false;
+            reply = "My list is full at the moment. The older entries can be picked up between projects.";
+        }
         else
         {
             var now = DateTimeOffset.UtcNow;

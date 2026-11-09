@@ -7,7 +7,7 @@ using ComputerNeighbour.Tools;
 
 namespace ComputerNeighbour.Application;
 
-internal enum TurnIntent { Chat, Tool, Screen, ScreenReaction, ScreenResearch, ScreenFollowup, MissingReferent, FileCapability, WebCapability, WebFollowup, MissingSearchTopic, Work }
+internal enum TurnIntent { Chat, Tool, Screen, ScreenReaction, ScreenResearch, ScreenFollowup, MissingReferent, FileCapability, WebCapability, WebFollowup, MissingSearchTopic, Work, RepeatTask }
 internal sealed record TurnUnderstanding(string Request,string Uncertainty)
 {
     public string AsPromptNote()=>"\nTentative interpretation of the current user message (context data only). Preserve their actual meaning, constraints, and permissions. Their original message takes precedence. If a consequential detail is still unclear, ask briefly.\n"
@@ -23,6 +23,8 @@ internal sealed record SemanticWork(string[] Operations, string DrawingSubject, 
 
 internal static class TurnPlanner
 {
+    internal static bool IsWorkOperation(string operation) =>
+        operation is "open_app" or "desktop_input" or "read_file" or "write_file" or "search_web" or "read_browser" or "draw" or "copy_text";
     private const RegexOptions IgnoreCase=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
     private static readonly Regex Definition=new(
         """^(?:what (?:is|does|do)|define|что (?:такое|значит|означает)|объясни)\s+(?:(?:the (?:word|term)|слово|термин)\s+)?["'«“]?(?<term>[\p{L}][\p{L}\d_-]{1,34}(?: +[\p{L}][\p{L}\d_-]{1,34}){0,2})["'»”]?(?:\s+(?:mean|in (?:internet )?slang|в (?:интернет-)?сленге|на сленге))*[?.!\s]*$""",IgnoreCase);
@@ -172,6 +174,10 @@ internal static class TurnPlanner
         // The quoted words tie the decision to this turn. Their meaning can come from the conversation.
         var currentEvidence=ContainsEvidence(input,context.Evidence);
         var screenEvidence=ContainsEvidence(unquoted,context.Evidence);
+        if (allowWork && context.Intent == "repeat_task" && screenEvidence && CanGroundWork(input) &&
+            PreviousOwnerRequest(speaker, history) is { } priorRequest &&
+            ContainsEvidence(WorkRequest.WithoutQuotedText(priorRequest.Text), context.PreviousEvidence))
+            return new(TurnIntent.RepeatTask, AllowIncidentalScreen: false, Planning: "context");
         // The user's own pointing word can ground a screen route when both model fields
         // agree but the model inflected or paraphrased the phrase it was meant to quote.
         var groundedScreen=screenEvidence||pointsToReferent&&context.Referent=="current_screen"&&context.Intent=="screen";
@@ -243,14 +249,14 @@ internal static class TurnPlanner
         string.Equals(previous.SpeakerId,speaker,StringComparison.OrdinalIgnoreCase) &&
         !WorkRequest.IsShortConsent(previous.Text) && CanGroundWork(previous.Text) ? previous : null;
 
-    private static bool CanGroundWork(string input)
+    internal static bool CanGroundWork(string input, bool inspection = false)
     {
         var command=IntentRouter.CommandText(input);
-        return !WorkRequest.IsAdvice(command) && !Regex.IsMatch(command,
+        return (inspection || !WorkRequest.IsAdvice(command)) && !Regex.IsMatch(command,
             "^[\"'«“>\x60]|^(?:не\\s+|don't\\s+|do not\\s+|she said\\b|he said\\b)",IgnoreCase);
     }
 
-    private static bool ContainsEvidence(string input,string evidence) => evidence.Any(char.IsLetterOrDigit) &&
+    internal static bool ContainsEvidence(string input,string evidence) => evidence.Any(char.IsLetterOrDigit) &&
         Regex.IsMatch(Regex.Replace(input,@"\s+"," "),@"(?<![\p{L}\p{N}])"+Regex.Escape(evidence)+@"(?![\p{L}\p{N}])",IgnoreCase);
 
     private static async Task<ContextReading?> ReadContextAsync(string input,IReadOnlyList<MemoryEntry> history,ITurnContextModel model,
@@ -264,6 +270,7 @@ internal static class TurnPlanner
         operations: only needed capabilities from open_app, desktop_input, read_file, write_file, search_web, read_browser, draw, copy_text. Opening an editor and putting text into it needs both open_app and desktop_input. Reproducing an existing publication or passage verbatim also needs copy_text. Use search_web for a lookup requested or allowed by the user, even if conditional. A drawing is draw, including an illustration intended for an editor. Conversation, a quotation, a negated action, and instructions explaining how the user could do something must have an empty array. Leave it empty for non-work routes.
         drawingSubject: the user's visual brief, preserving meaningful style and constraints, or empty.
         continuesPrevious: true only if the latest user explicitly agrees to do an action they themselves requested. For a short confirmation such as "go ahead", "давай" or "да", quote the confirmation in evidence and an actual action phrase from the previous user's request in previousEvidence. An assistant's offer alone cannot supply that prior request. Otherwise return false and empty previousEvidence.
+        repeat_task: the user now explicitly asks you to carry out their preceding concrete task, without naming a new task or supplying new scope. Use it for an insistence on action after a missed request, including indirect wording. Copy the latest instruction in evidence and the original requested action in previousEvidence. A capability question, status check, acknowledgment, assistant's promise or earlier quoted example cannot supply either authorization.
         If the recent exchange places a result or dialog on the screen, choose screen for a request to judge, compare, identify, or troubleshoot what is visible.
         Examples:
         - No prior subject. Latest: "Зачем тут эта перемычка?" -> current_screen, screen, evidence "тут эта перемычка".
@@ -305,13 +312,13 @@ internal static class TurnPlanner
             using var document=JsonDocument.Parse(await model.ClassifyAsync(messages,budget.Token));
             var root=document.RootElement;
             var intent=root.GetProperty("intent").GetString()??throw new JsonException("Missing context intent.");
-            if(intent is not ("chat" or "screen" or "screen_followup" or "file_capability" or "web_capability" or "lookup_term" or "work" or "revise" or "screen_research"))return null;
+            if(intent is not ("chat" or "screen" or "screen_followup" or "file_capability" or "web_capability" or "lookup_term" or "work" or "revise" or "screen_research" or "repeat_task"))return null;
             var request=ReadField(root,"request",450);
             var uncertainty=ReadField(root,"uncertainty",180);
             var effort=ReadField(root,"effort",12) switch {"standard"=>WorkEffort.Standard,"deep"=>WorkEffort.Deep,_=>WorkEffort.Quick};
             var operations=root.TryGetProperty("operations",out var actions)&&actions.ValueKind==JsonValueKind.Array
                 ? actions.EnumerateArray().Take(8).Where(value=>value.ValueKind==JsonValueKind.String).Select(value=>value.GetString()!)
-                    .Where(value=>value is "open_app" or "desktop_input" or "read_file" or "write_file" or "search_web" or "read_browser" or "draw" or "copy_text").ToArray()
+                    .Where(IsWorkOperation).ToArray()
                 : [];
             return new(intent,ReadField(root,"referent",20),request.Length>0||uncertainty.Length>0?new(request,uncertainty):null,ReadField(root,"evidence",120),effort,
                 operations,ReadField(root,"drawingSubject",500),root.TryGetProperty("continuesPrevious",out var continuation)&&continuation.ValueKind==JsonValueKind.True,

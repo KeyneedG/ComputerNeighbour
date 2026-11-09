@@ -65,7 +65,9 @@ public sealed partial class CompanionEngine
                     pending.Remove(id);
                 if (memory.Tasks.Current is { Pending: true } current && !IsIncognito)
                     await SaveCurrentWorkAsync(current with { Status = ComputerNeighbour.Memory.WorkflowStatus.Cancelled,
-                        Detail = "You cancelled the task." }, ct);
+                        Detail = "You cancelled the task." }, ct, consumeOffer: true);
+                else if (!IsIncognito && memory.Tasks is { PublicationOffer: not null } state)
+                    await memory.SaveTasksAsync(state, state with { PublicationOffer = null }, ct);
                 resumableWork = null;
                 delegateNextWork = false;
                 ui.Write("Stopped the current workflow and cleared its pending approval.");

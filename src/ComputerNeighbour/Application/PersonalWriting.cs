@@ -59,6 +59,23 @@ internal sealed class PersonalWriting(PortablePaths paths, FileWorkspace workspa
         return workspace.ReadForRevisionAsync(path, ct);
     }
 
+    internal string? FindForPublication(string reference, DateTimeOffset? offeredAt)
+    {
+        var directory = Path.GetDirectoryName(paths.Inside(Folder + "/probe.md"))!;
+        if (!Directory.Exists(directory)) return null;
+        var files = new DirectoryInfo(directory).EnumerateFiles("*.md", new EnumerationOptions
+        {
+            AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = true
+        }).Where(file => file.Length is > 0 and <= 1_000_000 && file.Name.Length <= 110 && !Device.IsMatch(file.Name))
+          .OrderByDescending(file => file.LastWriteTimeUtc).ThenBy(file => file.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+        var named = files.Where(file => offeredAt is null || file.CreationTimeUtc <= offeredAt.Value.UtcDateTime)
+            .Where(file => Path.GetFileNameWithoutExtension(file.Name) is { Length: >= 5 } title &&
+                reference.Contains(title, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(file => file.Name.Length).FirstOrDefault();
+        var selected = named ?? files.FirstOrDefault(file => offeredAt is null || file.LastWriteTimeUtc <= offeredAt.Value.UtcDateTime);
+        return selected is null ? null : Folder + "/" + selected.Name;
+    }
+
     internal static string StoryText(string title, string[] scenes, bool draft)
     {
         var heading = "# " + title + "\n\n";

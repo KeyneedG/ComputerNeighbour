@@ -98,7 +98,7 @@ internal sealed class WorkRequest
                 ? [authority]
                 : new[] { goal, PriorSubject }.SelectMany(text => Regex.Split(text, Sequence, IgnoreCase))
                     .Where(clause => Regex.IsMatch(clause, WebSearchWord, IgnoreCase)).ToArray();
-        Urls = canReadOnline ? WebUrl.Matches(subject).Select(m => m.Value.TrimEnd('.', ',', ')', ']', '!', '?')).ToArray() : [];
+        Urls = canReadOnline ? WebUrls(subject) : [];
         if (revision is not null && !NoChanges.IsMatch(goal))
         {
             if (revision.Kind == WorkArtifactKind.Image)
@@ -177,6 +177,9 @@ internal sealed class WorkRequest
     internal static bool CompatibleArtifactTarget(string request,string path) => FileNames(request).All(named =>
         named.Replace('\\','/').Equals(path.Replace('\\','/'),StringComparison.OrdinalIgnoreCase) ||
         !named.Contains('/') && !named.Contains('\\') && named.Equals(Path.GetFileName(path),StringComparison.OrdinalIgnoreCase));
+
+    internal static string[] WebUrls(string text) =>
+        WebUrl.Matches(text).Select(match => match.Value.TrimEnd('.', ',', ')', ']', '!', '?')).ToArray();
 
     internal bool AllowsSearchQuery(string query) => query.Length is >= 2 and <= 300 &&
         !query.Any(char.IsControl) && SearchClauses.Any(clause => clause.Contains(query, StringComparison.OrdinalIgnoreCase));

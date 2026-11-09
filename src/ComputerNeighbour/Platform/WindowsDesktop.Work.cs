@@ -1,10 +1,14 @@
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace ComputerNeighbour.Platform;
+
+// A stale target was detected before SendInput, so no click or keystroke was delivered.
+internal sealed class StaleWorkWindowException(string message, Exception? inner = null) : InvalidOperationException(message, inner);
 
 internal sealed record WorkWindow(nint Handle, nint Owner, uint ProcessId, string Process, string Title,
     int Left, int Top, int Width, int Height, nint FocusedControl = 0)
@@ -31,6 +35,7 @@ internal interface IWorkDesktop
     void Focus(string executable, int? launchedProcess = null);
     void Restore(WorkWindow window);
     void Click(WorkFrame frame, int x, int y);
+    void ClickBrowser(WorkFrame frame, int x, int y) => Click(frame, x, y);
     void Type(WorkFrame frame, string text);
     void Key(WorkFrame frame, string key);
     void Scroll(WorkFrame frame, int ticks);
@@ -112,18 +117,42 @@ public sealed partial class WindowsDesktop
         if (CurrentWorkWindow() != window) throw new InvalidOperationException("The approved window changed. Inspect it again before sending input.");
     }
 
-    void IWorkDesktop.Click(WorkFrame frame, int x, int y)
+    void IWorkDesktop.Click(WorkFrame frame, int x, int y) => ClickWorkFrame(frame, x, y, browser: false);
+    void IWorkDesktop.ClickBrowser(WorkFrame frame, int x, int y) => ClickWorkFrame(frame, x, y, browser: true);
+
+    private void ClickWorkFrame(WorkFrame frame, int x, int y, bool browser)
     {
         CheckWorkWindow(frame);
         var target = frame.ScreenPoint(x, y);
         var currentImage = CapturePng(frame.Window.Left, frame.Window.Top, frame.Window.Width, frame.Window.Height);
-        if (!currentImage.AsSpan().SequenceEqual(frame.Image))
-            throw new InvalidOperationException("The window's appearance changed. Inspect it again before clicking.");
+        if (!currentImage.AsSpan().SequenceEqual(frame.Image) &&
+            !(browser && SameClickRegion(frame, currentImage, x, y)))
+            throw new StaleWorkWindowException("The window's appearance changed. Inspect it again before clicking.");
         CheckWorkPoint(frame, target);
-        if (!SetCursorPos(target.X, target.Y)) throw new Win32Exception();
+        if (!SetCursorPos(target.X, target.Y)) throw new StaleWorkWindowException("Windows could not move the pointer to the target.", new Win32Exception());
         CheckWorkPoint(frame, target);
         Send([new Input { Type = 0, Data = new InputUnion { Mouse = new MouseInput { Flags = 0x0002 } } },
             new Input { Type = 0, Data = new InputUnion { Mouse = new MouseInput { Flags = 0x0004 } } }]);
+    }
+
+    private static bool SameClickRegion(WorkFrame frame, byte[] current, int x, int y)
+    {
+        // CapturePng writes one IDAT with unfiltered RGB rows. Ignore movement elsewhere on the page.
+        static ZLibStream Rows(byte[] png) => new(new MemoryStream(png, 41,
+            BinaryPrimitives.ReadInt32BigEndian(png.AsSpan(33, 4)), writable: false), CompressionMode.Decompress);
+        using var previousRows = Rows(frame.Image);
+        using var currentRows = Rows(current);
+        var previous = new byte[1 + frame.Width * 3];
+        var next = new byte[previous.Length];
+        var left = 1 + Math.Max(0, x - 28) * 3;
+        var right = 1 + Math.Min(frame.Width, x + 29) * 3;
+        for (var row = 0; row < Math.Min(frame.Height, y + 15); row++)
+        {
+            previousRows.ReadExactly(previous);
+            currentRows.ReadExactly(next);
+            if (row >= y - 14 && !previous.AsSpan(left, right - left).SequenceEqual(next.AsSpan(left, right - left))) return false;
+        }
+        return true;
     }
 
     void IWorkDesktop.Type(WorkFrame frame, string text)
@@ -155,8 +184,12 @@ public sealed partial class WindowsDesktop
 
     private void CheckWorkWindow(WorkFrame frame)
     {
-        if (CurrentWorkWindow() != frame.Window)
-            throw new InvalidOperationException("The target window changed. Inspect it again before sending input.");
+        WorkWindow current;
+        try { current = CurrentWorkWindow(); }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or ArgumentException or Win32Exception)
+        { throw new StaleWorkWindowException(ex.Message, ex); }
+        if (current != frame.Window)
+            throw new StaleWorkWindowException("The target window changed. Inspect it again before sending input.");
     }
 
     private void CheckWorkPoint(WorkFrame frame, (int X, int Y) point)
@@ -164,7 +197,7 @@ public sealed partial class WindowsDesktop
         CheckWorkWindow(frame);
         var hit = WindowFromPoint(new(point.X, point.Y));
         if (hit == 0 || GetAncestor(hit, 2) != frame.Window.Handle)
-            throw new InvalidOperationException("Another window covers the requested position.");
+            throw new StaleWorkWindowException("Another window covers the requested position.");
     }
 
     private WorkWindow CurrentWorkWindow()

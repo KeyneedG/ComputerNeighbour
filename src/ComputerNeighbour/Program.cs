@@ -80,6 +80,7 @@ public static class Program
             await regularEngine.GetRelationshipAsync(shutdown.Token);
             await regularEngine.InitializePersonalLifeAsync(shutdown.Token);
             await regularEngine.RestoreCurrentWorkAsync(shutdown.Token);
+            await regularEngine.RestoreMissedGoogleRequestAsync(shutdown.Token);
             await using var sessions=new CompanionSession(regularEngine,ui);
             var keyName=config.Audio.PushToTalkVirtualKey is >=0x70 and <=0x87?$"F{config.Audio.PushToTalkVirtualKey-0x6F}":$"VK 0x{config.Audio.PushToTalkVirtualKey:X2}";
             ui.Write($"Ready. Type English or Russian. Hold {keyName} to talk. Replies are English.\nMicrophone={config.Permissions.Microphone}; screen={config.Permissions.ScreenCapture}; computer input={config.Permissions.DesktopInput}.");
@@ -188,7 +189,7 @@ public static class Program
                                     else ui.Write("Type /forget CONFIRM to erase conversation memory, saved tasks and LoRA training data for the current session.");
                                     break;
                                 case "/task":case "/tasks": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
-                                case "/work":case "/google": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
+                                case "/work":case "/do":case "/google": await engine.RespondAsync(evt.Text,"user",false,false,shutdown.Token);break;
                                 case "/look": await engine.RespondAsync("Describe what you can actually see on my screen.","user",false,true,shutdown.Token);break;
                                 default: ui.Write("Unknown command. /help");break;
                             }
@@ -214,6 +215,7 @@ public static class Program
                             {
                                 var now=DateTimeOffset.Now;
                                 if(await engine.DeliverWorkTaskReminderAsync(now,activity))return true;
+                                if(await engine.TickRequestedGoogleAsync(now,desktop.GetInteractiveIdleTime(),activity))return true;
                                 if(engine.HasPriorityWork)return false;
                                 var maySpeak=!engine.BackgroundDeferred(now)&&config.Proactive.Enabled&&engine.CanInitiate;
                                 var idle=maySpeak||engine.AutonomyEnabled?desktop.GetInteractiveIdleTime():null;
@@ -399,10 +401,10 @@ public static class Program
     /forget CONFIRM Erase conversation memory and saved tasks
     /approve N     Approve a displayed computer action (expires in 2 minutes)
     /work TASK     Carry out a task in steps and check the results
+    /do [TASK]     Recheck and carry out a concrete request. Omit TASK to use your last request.
     /task current  Show the current task and what actually happened
     /task retry    Continue the current task from its checkpoint
-    /task compose  Open the reviewed X note draft in the browser
-    /task posted URL  Record the X post after you publish it
+    /task posted URL  Record a post you verified yourself
     /access        Show the computer access mode
     /full access   Permit automatic actions for explicit tasks in this session
     /ask before edit  Ask before changes and desktop input

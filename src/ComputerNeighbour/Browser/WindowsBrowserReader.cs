@@ -45,12 +45,18 @@ public sealed class WindowsBrowserReader : IBrowserReader
         if (browser is not null) Volatile.Write(ref lastBrowser, browser);
     }
 
-    public async Task<BrowserPage> ReadAsync(CancellationToken cancellationToken)
+    public Task<BrowserPage> ReadAsync(CancellationToken cancellationToken) => ReadAsync(null, false, cancellationToken);
+
+    internal Task<BrowserPage> ReadForegroundAsync(WorkWindow window, bool includeControls, CancellationToken ct) => ReadAsync(window, includeControls, ct);
+
+    private async Task<BrowserPage> ReadAsync(WorkWindow? target, bool includeControls, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!options.Enabled) throw new UnauthorizedAccessException("Browser reading is disabled.");
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Reading the open browser requires an interactive Windows desktop.");
-        var selected = SelectWindow();
+        var selected = target is null ? SelectWindow() : GetBrowserWindow(GetForegroundWindow());
+        if (selected is null || target is not null && (selected.Handle != target.Handle || selected.ProcessId != target.ProcessId))
+            throw new InvalidOperationException("The intended supported browser window is not in the foreground.");
         EnsureNotExcluded(selected.Title);
         Task<BrowserPage> operation;
         lock (workerGate)
@@ -65,7 +71,7 @@ public sealed class WindowsBrowserReader : IBrowserReader
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(options.ReadTimeoutSeconds));
-                try { completion.TrySetResult(ReadWindow(selected, timeout.Token)); }
+                try { completion.TrySetResult(ReadWindow(selected, target is not null, includeControls, timeout.Token)); }
                 catch (OperationCanceledException) { completion.TrySetCanceled(timeout.Token); }
                 catch (Exception ex) { completion.TrySetException(ex); }
             }) { IsBackground = true, Name = "ComputerNeighbour browser reader" };
@@ -78,9 +84,9 @@ public sealed class WindowsBrowserReader : IBrowserReader
         { throw new TimeoutException("The browser accessibility read exceeded its configured time limit. No page content was returned."); }
     }
 
-    private BrowserPage ReadWindow(WindowIdentity window, CancellationToken token)
+    private BrowserPage ReadWindow(WindowIdentity window, bool foregroundOnly, bool includeControls, CancellationToken token)
     {
-        EnsureWindowUnchanged(window);
+        EnsureWindowUnchanged(window, checkTitle: !foregroundOnly);
         using var automation = new NativeUia();
         using var root = automation.ElementFromHandle(window.Handle);
         token.ThrowIfCancellationRequested();
@@ -90,11 +96,13 @@ public sealed class WindowsBrowserReader : IBrowserReader
         var text = "";
         var truncated = false;
         string? documentUrl = null;
+        IReadOnlyList<BrowserControl> controls = [];
         for (var i = 0; i < count; i++)
         {
             token.ThrowIfCancellationRequested();
             using var document = documents.Get(i);
             if (automation.GetBoolean(document, NativeUia.IsOffscreenProperty) == true || automation.GetBoolean(document, NativeUia.IsPasswordProperty) == true) continue;
+            if (includeControls) controls = automation.ReadPageControls(document, token);
             documentUrl ??= NativeUia.WebAddress(automation.GetString(document, NativeUia.ValueProperty));
             // TextPattern covers actual document text, including off-viewport text exposed by the provider.
             text = automation.ReadDocumentText(document, options.MaxCharacters + 1, token) ?? "";
@@ -110,7 +118,7 @@ public sealed class WindowsBrowserReader : IBrowserReader
                 break; // Prefer the outermost visible document, not a different background tab/frame.
             }
         }
-        if (string.IsNullOrWhiteSpace(text))
+        if (string.IsNullOrWhiteSpace(text) && !foregroundOnly)
         {
             var publicUrl=initialUrl??documentUrl;
             if(allowPublicFetch&&options.PublicUrlFallback&&publicUrl is not null&&WebParsing.IsWebUrl(publicUrl))
@@ -128,10 +136,12 @@ public sealed class WindowsBrowserReader : IBrowserReader
         }
         token.ThrowIfCancellationRequested();
         var finalUrl = automation.ReadAddress(root, token);
-        EnsureWindowUnchanged(window);
+        var current = EnsureWindowUnchanged(window, checkTitle: !foregroundOnly);
+        if (foregroundOnly && (GetForegroundWindow() != window.Handle || initialUrl is null || finalUrl is null))
+            throw new InvalidOperationException("The browser moved or its address could not be verified.");
         if (initialUrl is not null && finalUrl is not null && !string.Equals(initialUrl, finalUrl, StringComparison.Ordinal))
             throw new InvalidOperationException("The browser navigated while its page was being read. Retry on the intended tab.");
-        return new(window.ProcessName, window.Title, finalUrl ?? initialUrl ?? documentUrl, text.Trim(), truncated);
+        return new(window.ProcessName, current.Title, finalUrl ?? initialUrl ?? documentUrl, text.Trim(), truncated) { Controls = controls };
     }
 
     private WindowIdentity SelectWindow()
@@ -177,12 +187,13 @@ public sealed class WindowsBrowserReader : IBrowserReader
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception) { return null; }
     }
 
-    private void EnsureWindowUnchanged(WindowIdentity original)
+    private WindowIdentity EnsureWindowUnchanged(WindowIdentity original, bool checkTitle = true)
     {
         var current = GetBrowserWindow(original.Handle);
-        if (current is null || current.ProcessId != original.ProcessId || !string.Equals(current.Title, original.Title, StringComparison.Ordinal))
+        if (current is null || current.ProcessId != original.ProcessId || checkTitle && !string.Equals(current.Title, original.Title, StringComparison.Ordinal))
             throw new InvalidOperationException("The selected browser window or page changed while reading. Focus the intended page and retry.");
         EnsureNotExcluded(current.Title);
+        return current;
     }
 
     private void EnsureNotExcluded(string title)

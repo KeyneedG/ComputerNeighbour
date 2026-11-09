@@ -28,12 +28,42 @@ public interface ITurnContextModel
     Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>Task.FromResult<string?>(null);
 }
 
-public sealed class LocalModel(PortablePaths paths, ModelOptions options, CancellationToken stopping = default) : IChatModel, ITurnContextModel, IDeepAnalysisModel, IAsyncDisposable
+internal interface IPublicationIntentModel
 {
+    Task<string> InterpretPublicationAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct);
+}
+
+internal interface IReplyTaskModel
+{
+    Task<string> ReviewTaskAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct);
+}
+
+public sealed class LocalModel(PortablePaths paths, ModelOptions options, CancellationToken stopping = default) : IChatModel, ITurnContextModel, IPublicationIntentModel, IReplyTaskModel, IDeepAnalysisModel, IAsyncDisposable
+{
+    private static readonly JsonElement ReplyTaskSchema = JsonSerializer.Deserialize<JsonElement>("""
+        {"type":"object","additionalProperties":false,"required":["action","evidence","previousEvidence","commitment","title","nextStep","existing","route","target","operations","defer"],"properties":{
+          "action":{"type":"string","enum":["none","google_ai","owner_task","personal_task","unverified","repeat_task"]},
+          "evidence":{"type":"string","maxLength":300},"commitment":{"type":"string","maxLength":300},
+          "previousEvidence":{"type":"string","maxLength":300},
+          "title":{"type":"string","maxLength":100},"nextStep":{"type":"string","maxLength":300},
+          "existing":{"type":"integer","minimum":0,"maximum":9},
+          "route":{"type":"string","enum":["note","work","search_web","read_web","read_browser","read_file","screen","diary_titles","publication"]},
+          "target":{"type":"string","maxLength":1200},"operations":{"type":"array","maxItems":8,
+            "items":{"type":"string","enum":["open_app","desktop_input","read_file","write_file","search_web","read_browser","draw","copy_text"]}},
+          "defer":{"type":"boolean"}}}
+        """);
+    private static readonly JsonElement PublicationIntentSchema = JsonSerializer.Deserialize<JsonElement>("""
+        {"type":"object","additionalProperties":false,"required":["action","material","site","siteReference","evidence","another","signatureEvidence"],"properties":{
+          "action":{"type":"string","enum":["none","publish","offer","approve","retry","status"]},
+          "material":{"type":"string","enum":["none","same","writing","reading_note"]},
+          "site":{"type":"string","maxLength":253},"siteReference":{"type":"string","maxLength":180},
+          "evidence":{"type":"string","maxLength":180},"another":{"type":"boolean"},"signatureEvidence":{"type":"string","maxLength":180}
+        }}
+        """);
     private static readonly JsonElement ContextSchema=JsonSerializer.Deserialize<JsonElement>("""
     {"type":"object","additionalProperties":false,"required":["referent","intent","request","uncertainty","evidence","effort","operations","drawingSubject","continuesPrevious","previousEvidence"],"properties":{
       "referent":{"type":"string","enum":["current_screen","text","unknown","none"]},
-      "intent":{"type":"string","enum":["chat","screen","screen_research","screen_followup","file_capability","web_capability","lookup_term","work","revise"]},
+      "intent":{"type":"string","enum":["chat","screen","screen_research","screen_followup","file_capability","web_capability","lookup_term","work","revise","repeat_task"]},
       "effort":{"type":"string","enum":["quick","standard","deep"]},
       "request":{"type":"string","maxLength":450},"uncertainty":{"type":"string","maxLength":180},"evidence":{"type":"string","maxLength":120},
       "operations":{"type":"array","maxItems":8,"items":{"type":"string","enum":["open_app","desktop_input","read_file","write_file","search_web","read_browser","draw","copy_text"]}},
@@ -293,6 +323,10 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
         _ => RequestAsync(messages,purpose is GenerationPurpose.Metadata or GenerationPurpose.ToolPlanning,purpose==GenerationPurpose.Dialogue?options.Temperature:0.25,purpose==GenerationPurpose.Dialogue,ct,useAdapter:useAdapter)
     };
     public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages,CancellationToken ct)=>RequestAsync(messages,true,0,false,ct,ContextSchema,360);
+    Task<string> IPublicationIntentModel.InterpretPublicationAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) =>
+        RequestAsync(messages, true, 0, false, ct, PublicationIntentSchema, 260);
+    Task<string> IReplyTaskModel.ReviewTaskAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) =>
+        RequestAsync(messages, true, 0, false, ct, ReplyTaskSchema, 650);
     public async Task<string?> PlanSpeechAsync(IReadOnlyList<ChatMessage> messages,int sentenceCount,CancellationToken ct)=>
         await RequestAsync(messages,true,0,false,ct,SpeechSchemas[sentenceCount-1],140);
     private async Task<string> RequestAsync(IReadOnlyList<ChatMessage> messages,bool json,double temperature,bool dialogue,CancellationToken ct,JsonElement? schema=null,int? maxTokens=null,int thinkingBudget=0,bool useAdapter=false)

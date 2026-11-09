@@ -10,8 +10,7 @@ internal sealed record WorkTaskCommand(string Action, string Target = "", string
         /tasks                            List saved tasks
         /task current                     Show the current workflow and its next step
         /task retry                       Continue the current workflow
-        /task compose                     Open the reviewed X draft
-        /task posted URL                  Record the X post you published
+        /task posted URL                  Record a post you verified yourself
         /task save NAME | GOAL | PROGRESS | NEXT STEP
         /task resume NAME                 Pick up a saved task
         /task attach NAME | FILE OR URL    Link a material to a task

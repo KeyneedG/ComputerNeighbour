@@ -316,6 +316,39 @@ internal static class AutonomyTests
                 "The break immediately switched to another writing project.");
         });
 
+        await suite.Case("finishing a story leaves time for research before a queued continuation can resume", async root =>
+        {
+            var paths = new PortablePaths(root);
+            var now = DateTimeOffset.UtcNow;
+            var reference = PersonalWriting.Folder + "/An unfinished ending.md";
+            Directory.CreateDirectory(paths.Inside(PersonalWriting.Folder));
+            await File.WriteAllTextAsync(paths.Inside(reference), string.Concat(Enumerable.Repeat("She left the old ferry bell beside the window. ", 5)));
+            var continuation = new PersonalGoalState(PersonalGoal.ContinueStory, Guid.NewGuid(), now, "The old ferry bell")
+                { Reference = reference };
+            var research = new PersonalGoalState(PersonalGoal.Explore, Guid.NewGuid(), now, "Cyanotypes");
+            await new PersonalLife(paths).SaveAsync(new()
+            {
+                Journal = [new(now, PersonalGoal.Write, continuation.Topic, "The story is finished.", reference)],
+                Backlog = [new(continuation, now.AddMinutes(-1), "Reread this one."), new(research, now, "Read about cyanotypes.")]
+            }, default);
+
+            var web = new FakeWeb();
+            await using (var run = await Fixture.OpenAsync(paths, web))
+            {
+                Check.True(run.Engine.DescribePersonalLife(now).Contains("Next writing project waits at least 45 more minutes"),
+                    "The writing cooldown wasn't visible.");
+                await StepsAsync(run.Engine, now.AddMinutes(1), 7);
+                var state = await ReadLifeAsync(paths);
+                Check.True(web.Reads.Count > 0 && state.Journal.Any(note => note.Goal == PersonalGoal.Explore),
+                    "The next activity didn't have time to read a source.");
+                Check.Equal(continuation.Id, state.Backlog.Single().Goal.Id);
+            }
+
+            await using var reopened = await Fixture.OpenAsync(paths, web);
+            await Tick(reopened.Engine, now.AddMinutes(45));
+            Check.Equal(continuation.Id, (await ReadLifeAsync(paths)).Active?.Id);
+        });
+
         await suite.Case("a missing owned file is confirmed twice and causes one grounded initiative", async root =>
         {
             var paths = new PortablePaths(root);

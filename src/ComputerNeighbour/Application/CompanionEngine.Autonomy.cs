@@ -200,8 +200,10 @@ public sealed partial class CompanionEngine
             $"- {DescribeProject(item.Goal, now)} · {(item.Due <= now ? "due" : item.Due.ToLocalTime().ToString("MM-dd HH:mm"))} · {item.Reason}");
         var breaks = state.Breaks.Where(item => item.Until > now).Select(item => $"{item.Kind} until {item.Until.ToLocalTime():HH:mm}");
         var breakNote = string.Join(", ", breaks);
+        var writingCooldown = WritingCooldownRemaining(state, now);
         return $"Personal life: {status}. Diary: {state.Journal.Length}. Practice examples: {state.Exercises.Length}.\n" +
             (breakNote.Length == 0 ? "" : "Taking a break from " + breakNote + ".\n") +
+            (writingCooldown == TimeSpan.Zero ? "" : $"Next writing project waits at least {Math.Ceiling(writingCooldown.TotalMinutes):0} more minutes.\n") +
             (state.Backlog.Length == 0 ? "For later: no projects queued." : "For later\n" + string.Join("\n", backlog));
     }
 
@@ -590,7 +592,8 @@ public sealed partial class CompanionEngine
         }
     }
 
-    private async Task<GoogleVisualResult> AskPersonalGoogleAsync(string question, CancellationToken ct, bool explicitTest = false)
+    private async Task<GoogleVisualResult> AskPersonalGoogleAsync(string question, CancellationToken ct, bool explicitTest = false,
+        Action? beforeSubmit = null)
     {
         Volatile.Write(ref personalBrowserInUse, 1);
         try
@@ -598,7 +601,8 @@ public sealed partial class CompanionEngine
             if (PersonalGoogleOverride is { } ask) return await ask(question, ct);
             return await (googleVisualSearch ??= new GoogleAiMode(desktop, paths.Inside("data/tmp")))
                 .AskAsync(question, Path.GetDirectoryName(paths.Inside("data/autonomy/chrome/Local State"))!,
-                    () => explicitTest || desktop.GetInteractiveIdleTime() >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds), ct);
+                    () => explicitTest || desktop.GetInteractiveIdleTime() >= TimeSpan.FromSeconds(config.Autonomy.IdleSeconds), ct,
+                    beforeSubmit: beforeSubmit);
         }
         finally { Volatile.Write(ref personalBrowserInUse, 0); }
     }

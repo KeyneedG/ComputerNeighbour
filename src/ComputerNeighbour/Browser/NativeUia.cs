@@ -15,6 +15,7 @@ internal sealed class NativeUia : IDisposable
     internal const int IsPasswordProperty = 30019;
     internal const int ValueProperty = 30045;
     private const int EditControlType = 50004, TextControlType = 50020;
+    private const int HasKeyboardFocusProperty = 30008;
     private readonly ComPointer automation;
     private readonly bool uninitialize;
 
@@ -99,6 +100,70 @@ internal sealed class NativeUia : IDisposable
         }
         finally { VariantClear(ref value); }
     }
+
+    internal IReadOnlyList<BrowserControl> ReadPageControls(ComPointer document, CancellationToken ct)
+    {
+        var controls = new List<BrowserControl>();
+        using var focusedEditor = FindFocusedEditor(ct);
+        foreach (var type in new[] { EditControlType, 50000, 50005 }) // Edit, Button, Hyperlink
+        {
+            using var elements = FindByControlType(document, type);
+            var count = Math.Min(elements.Count, 160);
+            for (var i = 0; i < count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                using var item = elements.Get(i);
+                var edit = type == EditControlType;
+                var name = GetString(item, 30005)?.Trim() ?? "";
+                if ((!edit && name.Length is 0 or > 80) || edit && GetBoolean(item, 30046) == true || GetBoolean(item, IsOffscreenProperty) == true ||
+                    GetBoolean(item, 30010) == false || GetBoolean(item, IsPasswordProperty) == true || ElementCenter(item) is not { } point) continue;
+                var hasFocus = GetBoolean(item, HasKeyboardFocusProperty) == true ||
+                    edit && focusedEditor is not null && SameElement(item, focusedEditor);
+                controls.Add(new(name, point.X, point.Y, edit, hasFocus, edit ? GetString(item, ValueProperty) : null, IsLink: type == 50005));
+            }
+        }
+        return controls;
+    }
+
+    private ComPointer? AutomationPointer(int slot) =>
+        Method<GetPointerDelegate>(automation, slot)(automation.Handle, out var pointer) >= 0 && pointer != IntPtr.Zero ? new(pointer) : null;
+
+    private ComPointer? FindFocusedEditor(CancellationToken ct)
+    {
+        using var walker = AutomationPointer(16); // RawViewWalker includes children skipped by the control view.
+        if (walker is null) return null;
+        var current = AutomationPointer(8); // GetFocusedElement
+        try
+        {
+            for (var depth = 0; current is not null && depth < 24; depth++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var type = ControlType(current);
+                if (type == EditControlType)
+                {
+                    var editor = current;
+                    current = null;
+                    return editor;
+                }
+                if (type is DocumentControlType or 50032 ||
+                    Method<GetParentDelegate>(walker, 3)(walker.Handle, current.Handle, out var parent) < 0 || parent == IntPtr.Zero) break;
+                current.Dispose();
+                current = new(parent);
+            }
+            return null;
+        }
+        finally { current?.Dispose(); }
+    }
+
+    private static int? ControlType(ComPointer element)
+    {
+        var result = Method<GetPropertyDelegate>(element, 10)(element.Handle, 30003, out var value);
+        try { return result >= 0 && value.Type == 3 ? value.Integer : null; }
+        finally { VariantClear(ref value); }
+    }
+
+    private bool SameElement(ComPointer first, ComPointer second) =>
+        Method<CompareElementsDelegate>(automation, 3)(automation.Handle, first.Handle, second.Handle, out var same) >= 0 && same != 0;
 
     internal string? ReadAddress(ComPointer root, CancellationToken token)
     {
@@ -217,6 +282,7 @@ internal sealed class NativeUia : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetPropertyDelegate(IntPtr self, int property, out Variant value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetPatternAsDelegate(IntPtr self, int pattern, ref Guid iid, out IntPtr value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetPointerDelegate(IntPtr self, out IntPtr value);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int CompareElementsDelegate(IntPtr self, IntPtr first, IntPtr second, out int same);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetTextDelegate(IntPtr self, int maxLength, out IntPtr bstr);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetIntDelegate(IntPtr self, out int value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)] private delegate int GetElementDelegate(IntPtr self, int index, out IntPtr element);

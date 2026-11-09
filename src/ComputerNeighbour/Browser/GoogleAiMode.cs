@@ -32,11 +32,11 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
     }
 
     internal Task<GoogleVisualResult> AskAsync(string question, string profile, Func<bool> desktopIdle, CancellationToken ct,
-        Action<string>? status = null) =>
-        RunInBrowserAsync(null, question, status ?? (_ => { }), profile, desktopIdle, ct);
+        Action<string>? status = null, Action? beforeSubmit = null) =>
+        RunInBrowserAsync(null, question, status ?? (_ => { }), profile, desktopIdle, ct, beforeSubmit);
 
     private async Task<GoogleVisualResult> RunInBrowserAsync(byte[]? image, string question, Action<string> status,
-        string? profile, Func<bool>? desktopIdle, CancellationToken ct)
+        string? profile, Func<bool>? desktopIdle, CancellationToken ct, Action? beforeSubmit = null)
     {
         if (Interlocked.Exchange(ref busy, 1) != 0)
             throw new InvalidOperationException("The previous Google browser operation is still finishing.");
@@ -60,7 +60,7 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
             var attachment = file;
             var operation = Task.Run(() =>
             {
-                try { return Run(browser, attachment, question, status, desktopIdle, token); }
+                try { return Run(browser, attachment, question, status, desktopIdle, token, beforeSubmit); }
                 finally
                 {
                     if (profile is not null) desktop.ClosePersonalGoogleWindow(browser);
@@ -88,7 +88,7 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
     }
 
     private GoogleVisualResult Run(WorkWindow browser, string? file, string question, Action<string> status,
-        Func<bool>? desktopIdle, CancellationToken ct)
+        Func<bool>? desktopIdle, CancellationToken ct, Action? beforeSubmit)
     {
         using var uia = new NativeUia();
         using var root = uia.ElementFromHandle(browser.Handle);
@@ -116,6 +116,7 @@ internal sealed class GoogleAiMode(WindowsDesktop desktop, string temporaryDirec
             VerifyTarget(uia, root, browser, ct);
             if (inputStamp is null || WindowsDesktop.GoogleInputStamp() != inputStamp)
                 throw new InvalidOperationException("The desktop became active before Google could receive the question.");
+            beforeSubmit?.Invoke();
             if (!uia.TryInvoke(send))
             {
                 if (uia.GetBoolean(composer, HasFocus) != true ||

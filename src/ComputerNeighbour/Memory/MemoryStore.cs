@@ -17,18 +17,29 @@ internal enum WorkArtifactKind { Image, TextFile, EditorText }
 internal sealed record WorkArtifact(WorkArtifactKind Kind, string Path, string Goal, string SpeakerId, bool OpenInPaint = false);
 
 internal sealed record WorkTask(string Title, string Goal, string Progress, string NextStep,
-    IReadOnlyList<string> References, DateTimeOffset? ReminderAt = null);
+    IReadOnlyList<string> References, DateTimeOffset? ReminderAt = null, CurrentWorkflow? Workflow = null);
 
 internal enum WorkflowStatus { Running, Blocked, Approval, Draft, ComposerOpened, Finished, Cancelled }
+internal enum TaskExecutionKind { Work, SearchWeb, ReadWeb, ReadBrowser, ReadFile, Screen, DiaryTitles }
+internal sealed record TaskExecution(TaskExecutionKind Kind, string Target = "", string[]? Operations = null);
 internal sealed record CurrentWorkflow(string Request, string Speaker, WorkflowStatus Status, string Detail,
-    bool MayHaveChangedComputer = false, string? Draft = null)
+    bool MayHaveChangedComputer = false, string? Draft = null, DateTimeOffset? PublicationAnchor = null,
+    bool SignPublication = false, string? PreviousPublicationDraft = null, RequestedGoogle? Google = null,
+    TaskExecution? Execution = null)
 {
     internal bool Pending => Status is not (WorkflowStatus.Finished or WorkflowStatus.Cancelled);
 }
 
+internal sealed record RequestedGoogle(DateTimeOffset OwnerTurn, DateTimeOffset? RetryAt, string? Question = null);
+internal sealed record RecoveredRequest(DateTimeOffset FollowupAt, DateTimeOffset RequestAt);
+
 internal sealed record WorkTaskState(IReadOnlyList<WorkTask> Items, string? ActiveTitle = null)
 {
     public CurrentWorkflow? Current { get; init; }
+    public CurrentWorkflow? QueuedGoogle { get; init; }
+    public CurrentWorkflow? BrowserPublication { get; init; }
+    public CurrentWorkflow? PublicationOffer { get; init; }
+    public RecoveredRequest? LastRecovery { get; init; }
     internal WorkTask? Active => Items.FirstOrDefault(t => t.Title == ActiveTitle);
 
     internal WorkTaskState WithTask(WorkTask task, bool activate = true) =>
@@ -314,12 +325,17 @@ public sealed class MemoryStore
             state.Recent.Any(e => e is null || e.Text is null || e.Role is null || e.SpeakerId is null) ||
             state.Tasks?.Items is null || state.Tasks.Items.Any(t => t is null || string.IsNullOrWhiteSpace(t.Title) ||
                 t.Goal is null || t.Progress is null || t.NextStep is null || t.References is null ||
-                t.References.Any(string.IsNullOrWhiteSpace)) ||
-            state.Tasks.Current is { } current && (!Enum.IsDefined(current.Status) || current.Request is not { Length: > 0 and <= 8000 } ||
-                string.IsNullOrWhiteSpace(current.Speaker) || current.Detail is not { Length: <= 1000 } || current.Draft is { Length: > 240 }))
+                t.References.Any(string.IsNullOrWhiteSpace) || InvalidWorkflow(t.Workflow)) ||
+            InvalidWorkflow(state.Tasks.Current) || InvalidWorkflow(state.Tasks.BrowserPublication) || InvalidWorkflow(state.Tasks.PublicationOffer) ||
+            InvalidWorkflow(state.Tasks.QueuedGoogle) || state.Tasks.QueuedGoogle is { Google: null } or { Pending: false })
             throw new InvalidDataException("Unsupported or incomplete memory snapshot.");
         return state;
     }
+
+    private static bool InvalidWorkflow(CurrentWorkflow? current) => current is not null &&
+        (!Enum.IsDefined(current.Status) || current.Request is not { Length: > 0 and <= 8000 } ||
+            string.IsNullOrWhiteSpace(current.Speaker) || current.Detail is not { Length: <= 1000 } ||
+            current.Execution is { } execution && (!Enum.IsDefined(execution.Kind) || execution.Target is not { Length: <= 1200 }));
 
     private async Task SaveStateAsync(MemoryState state, CancellationToken cancellationToken)
     {

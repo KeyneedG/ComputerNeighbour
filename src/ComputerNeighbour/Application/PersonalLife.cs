@@ -105,27 +105,25 @@ internal sealed class PersonalLife(PortablePaths paths)
         var file = paths.Inside(Name);
         if (File.Exists(file))
         {
-            if (new FileInfo(file).Length > 4_000_000) throw new InvalidDataException("Personal life data exceeds its limit.");
             await using var input = File.OpenRead(file);
             var saved = await JsonSerializer.DeserializeAsync<PersonalLifeState>(input, AppConfig.Json, ct);
+            // Validate the shape here. The scheduler manages retention, and saved text can be longer than a prompt budget.
             if (saved is null || !Valid(saved.Active) || !Valid(saved.Suspended) ||
                 saved.Previous is { } previous && !Enum.IsDefined(previous) ||
-                saved.Challenge is { } challenge && (challenge.Tool is not { Length: > 0 and <= 40 } || challenge.Target is { Length: > 1200 }) ||
-                saved.Notice is { } notice && notice.Text is not { Length: > 0 and <= 2400 } ||
-                saved.Journal is null || saved.Journal.Length > 60 || saved.Journal.Any(note => note is null ||
+                saved.Challenge is { } challenge && string.IsNullOrWhiteSpace(challenge.Tool) ||
+                saved.Notice is { } notice && string.IsNullOrWhiteSpace(notice.Text) ||
+                saved.Journal is null || saved.Journal.Any(note => note is null ||
                     !Enum.IsDefined(note.Goal) || note.Topic is null || note.Observation is null || note.Reference is null) ||
-                saved.Backlog is not { Length: <= PersonalLifeState.QueueLimit } ||
-                saved.Backlog.Any(item => item is null || item.Goal is null || !Valid(item.Goal) || item.Reason is not { Length: <= 300 }) ||
-                saved.RecentProjects is not { Length: <= 8 } || !saved.RecentProjects.All(Enum.IsDefined) ||
-                saved.Focus is { } focus && (!Enum.IsDefined(focus.Kind) || !double.IsFinite(focus.Seconds) || focus.Seconds is < 0 or > 86400) ||
-                saved.Breaks is not { Length: <= 6 } || saved.Breaks.Any(item => item is null || !Enum.IsDefined(item.Kind)) ||
-                saved.WebHistory is not { Length: <= 32 } || saved.WebHistory.Any(item => item is null || item.Step is null ||
+                saved.Backlog is null || saved.Backlog.Any(item => item is null || item.Goal is null || !Valid(item.Goal) || item.Reason is null) ||
+                saved.RecentProjects is null || !saved.RecentProjects.All(Enum.IsDefined) ||
+                saved.Focus is { } focus && (!Enum.IsDefined(focus.Kind) || !double.IsFinite(focus.Seconds) || focus.Seconds < 0) ||
+                saved.Breaks is null || saved.Breaks.Any(item => item is null || !Enum.IsDefined(item.Kind)) ||
+                saved.WebHistory is null || saved.WebHistory.Any(item => item is null || item.Step is null ||
                     item.Topic is null || item.Result is null || item.Reference is null) ||
-                saved.Reflections is not { Length: <= 60 } || saved.Reflections.Any(item => item is null || item.Topic is null ||
+                saved.Reflections is null || saved.Reflections.Any(item => item is null || item.Topic is null ||
                     item.Stage is null || item.Note is null || item.Reference is null) ||
-                saved.Artifacts is not { Length: <= 80 } || saved.Artifacts.Any(item => item is null ||
-                    item.Path is not { Length: > 0 and <= 240 } || item.Title is not { Length: <= 120 }) ||
-                saved.Exercises is null || saved.Exercises.Length > 16 || saved.Exercises.Any(example => example is null ||
+                saved.Artifacts is null || saved.Artifacts.Any(item => item is null || string.IsNullOrWhiteSpace(item.Path) || item.Title is null) ||
+                saved.Exercises is null || saved.Exercises.Any(example => example is null ||
                     string.IsNullOrWhiteSpace(example.Prompt) || string.IsNullOrWhiteSpace(example.Reply)))
                 throw new InvalidDataException("Invalid personal life checkpoint.");
             State = saved;
@@ -158,17 +156,15 @@ internal sealed class PersonalLife(PortablePaths paths)
     }
 
     private static bool Valid(PersonalGoalState? goal) => goal is null || Enum.IsDefined(goal.Goal) &&
-        goal.Id != Guid.Empty && goal.Topic is { Length: <= 120 } && goal.Material is { Length: <= 14000 } &&
-        goal.Reference is { Length: <= 1200 } && goal.Links is { Length: <= 3 } && goal.Links.All(link => link is { Length: <= 1200 }) &&
-        goal.Failed is { Length: <= 32 } && goal.Failed.All(Enum.IsDefined) && goal.Deferrals is >= 0 and <= 100 &&
-        goal.Images is { Length: <= 4 } && goal.Images.All(image => image is not null &&
-            image.Url is { Length: <= 1200 } && image.Caption is { Length: <= 200 }) &&
-        (goal.Challenge is null || goal.Challenge.Tool is { Length: > 0 and <= 40 } && goal.Challenge.Target is not { Length: > 1200 }) &&
-        goal.Project is { Title.Length: <= 100, Aim.Length: <= 1000, Draft.Length: <= 9000, Prompt.Length: <= 600,
-            Destination.Length: <= 240, OriginalHash.Length: <= 64, DraftHash.Length: <= 64, ImageNote.Length: <= 1000,
-            Revisions: >= 0 and <= 8, Visit: >= 0 and <= 2,
+        goal.Id != Guid.Empty && goal.Topic is not null && goal.Material is not null && goal.Reference is not null &&
+        goal.Links is not null && goal.Links.All(link => link is not null) &&
+        goal.Failed is not null && goal.Failed.All(Enum.IsDefined) && goal.Deferrals >= 0 &&
+        goal.Images is not null && goal.Images.All(image => image is not null && image.Url is not null && image.Caption is not null) &&
+        (goal.Challenge is null || !string.IsNullOrWhiteSpace(goal.Challenge.Tool)) &&
+        goal.Project is { Title: not null, Aim: not null, Draft: not null, Prompt: not null, Destination: not null,
+            OriginalHash: not null, DraftHash: not null, ImageNote: not null, Revisions: >= 0, Visit: >= 0,
             Outline.Length: <= 3, Scenes.Length: <= 3 } project &&
-        project.Outline.All(item => item is { Length: <= 650 }) && project.Scenes.All(item => item is { Length: <= 3500 }) &&
+        project.Outline.All(item => item is not null) && project.Scenes.All(item => item is not null) &&
         (project.Review is null || project.Review.Decision is ("accept" or "revise" or "research" or "defer" or "keep") &&
-            project.Review.Feedback is { Length: <= 550 } && project.Review.Scene is >= 0 and <= 3);
+            project.Review.Feedback is not null && project.Review.Scene is >= 0 and <= 3);
 }

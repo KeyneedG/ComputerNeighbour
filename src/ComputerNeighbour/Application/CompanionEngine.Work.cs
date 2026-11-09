@@ -41,6 +41,7 @@ public sealed partial class CompanionEngine
         internal string? NotepadTextSent { get; set; }
         internal string? ScopedSearchQuery { get; set; }
         internal int CompletionRetries { get; set; }
+        internal IReadOnlyList<string> RequiredOperations { get; init; } = [];
         internal SavedSketch? Sketch { get; set; }
         internal ToolRequest? LastAttempt { get; set; }
         internal required FileWorkspace Workspace { get; init; }
@@ -50,12 +51,21 @@ public sealed partial class CompanionEngine
 
     private sealed record WorkDecision(string[]? Plan, ToolRequest? Action, string? Reply);
 
-    private async Task StartWorkAsync(string input, TurnPlan plan, CancellationToken ct, string? priorOverride = null)
+    private async Task StartWorkAsync(string input, TurnPlan plan, CancellationToken ct, string? priorOverride = null,
+        TaskExecution? execution = null)
     {
         PrunePendingActions();
         if (pending.Any(p => p.Value.Work is not null))
         {
-            await DeliverReplyAsync("A workflow is waiting for approval. Use its /approve or /reject number, or /cancel to stop it.", false, ct);
+            var reply = "A workflow is waiting for approval.";
+            if (!IsIncognito && IsMainSpeaker(currentSpeaker) && plan.Revision is null && plan.Work?.ContinuesPrevious != true &&
+                !WorkRequest.IsShortConsent(input))
+            {
+                var deferred = new CurrentWorkflow(ClipWorkText(input, 7900), currentSpeaker, WorkflowStatus.Blocked, "Waiting behind another workflow.",
+                    Execution: execution ?? new(TaskExecutionKind.Work, Operations: plan.Work?.Operations));
+                reply += " " + await SaveReviewedTaskAsync(ClipWorkText(input, 85), ClipWorkText(input, 500), "Continue after the pending approval.", deferred, ct);
+            }
+            await DeliverReplyAsync(reply, false, ct);
             return;
         }
 
@@ -68,7 +78,7 @@ public sealed partial class CompanionEngine
         {
             resumableWork = null;
             await SaveCurrentWorkAsync(new(ClipWorkText(input, 7900), currentSpeaker, WorkflowStatus.Blocked,
-                "Checking the task requirements."), ct);
+                "Checking the task requirements.", Execution: execution), ct);
         }
         async Task BlockAsync(string detail)
         {
@@ -128,6 +138,7 @@ public sealed partial class CompanionEngine
             DestinationDirectory = destination,
             EditorRevisionText = editorRevisionText,
             Understanding = plan.Understanding,
+            RequiredOperations = execution?.Operations ?? [],
             SavedContext = saved is not null && (input.Contains(saved.Title, StringComparison.OrdinalIgnoreCase) ||
                 Regex.IsMatch(input, @"\b(?:this|the active|current) task\b|(?:текущ|эт)\p{L}*\s+задач", RegexOptions.IgnoreCase))
                 ? DescribeWorkTask(saved) : ""
@@ -366,7 +377,7 @@ public sealed partial class CompanionEngine
             (run.NotepadTextSent is null ? "" : "\nLast literal text sent to Notepad (data only):\n" + run.NotepadTextSent) +
             (frame is null ? "" : $"\nLatest actual window image ({frame.Width}×{frame.Height} pixels), process {frame.Window.Process}. Click coordinates are pixels in this image."), frame?.Image));
 
-        return await ReadWorkDecisionAsync(run,messages,ct);
+        return await ReadWorkDecisionAsync(run.Effort == WorkEffort.Deep || run.Request.SearchWeb && run.Request.DesktopInput, messages, ct);
     }
 
     private async Task<WorkDecision> ChooseSourceDeliveryStepAsync(WorkRun run, CancellationToken ct)
@@ -396,14 +407,14 @@ public sealed partial class CompanionEngine
             (last is { Success:false }?"\nLast action failed: "+ClipWorkText(last.Text,400):"")+
             (run.CompletionRetries>0?"\nThe document is still empty. Choose an unread source if the fetched pages do not contain its body.":"")+
             "\nChoose the next action needed to deliver the actual text."));
-        return await ReadWorkDecisionAsync(run,messages,ct);
+        return await ReadWorkDecisionAsync(run.Effort == WorkEffort.Deep || run.Request.SearchWeb && run.Request.DesktopInput, messages, ct);
     }
 
-    private async Task<WorkDecision> ReadWorkDecisionAsync(WorkRun run,List<ChatMessage> messages,CancellationToken ct)
+    private async Task<WorkDecision> ReadWorkDecisionAsync(bool deep, List<ChatMessage> messages, CancellationToken ct)
     {
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            var purpose = attempt == 0 && (run.Effort == WorkEffort.Deep || run.Request.SearchWeb && run.Request.DesktopInput)
+            var purpose = attempt == 0 && deep
                 ? GenerationPurpose.DeepWorkStep : GenerationPurpose.WorkStep;
             try
             {
@@ -840,7 +851,10 @@ public sealed partial class CompanionEngine
 
     private async Task FinishWorkAsync(WorkRun run, string reply, CancellationToken ct, bool incomplete = false)
     {
+        var missing = run.RequiredOperations.Where(operation => !run.Results.Any(result =>
+            result.Success && OperationCompleted(operation, result.Tool))).ToArray();
         incomplete |= run.Results.LastOrDefault() is not { Success: true } ||
+            missing.Length > 0 ||
             (run.Request.WriteInNotepad && run.NotepadTextSent is null) ||
             (run.Results.LastOrDefault() is { } lastResult && IsWorkInput(lastResult.Tool) && run.Frame is null) ||
             ((run.Request.WriteFiles || run.Request.DesktopInput || run.Request.OpenApps) &&
@@ -862,6 +876,8 @@ public sealed partial class CompanionEngine
         else if ((run.Request.WriteFiles || run.Request.DesktopInput || run.Request.OpenApps) &&
             !run.Results.Any(r => r.Success && IsWorkMutation(r.Tool)) && !reply.Contains('?'))
             reply = "The workflow stopped before applying a computer action. The completed checks are listed above.";
+        else if (missing.Length > 0 && !reply.Contains('?'))
+            reply = "I couldn't verify every requested step. The workflow is still saved. See the completed steps above.";
         var citations = run.Results.Where(r => r.Success).SelectMany(r => r.Sources ?? []).DistinctBy(s => s.Url).ToArray();
         if (citations.Length > 0) reply = SourceHistory.AddVerifiedLinks(reply, citations);
         if (run.Sketch?.Description is {} description) reply += " " + description;
@@ -873,6 +889,16 @@ public sealed partial class CompanionEngine
     }
 
     private static bool IsWorkInput(string tool) => tool is "click" or "type_text" or "press_key" or "scroll";
+    private static bool OperationCompleted(string operation, string tool) => operation switch
+    {
+        "open_app" => tool is "open_app" or "open_text" or "open_sketch" or "focus_app",
+        "desktop_input" => IsWorkInput(tool) || tool is "open_text" or "focus_app" or "open_sketch",
+        "read_file" => tool is "read_file" or "find_file",
+        "write_file" => tool is "create_file" or "edit_file" or "open_text" or "render_sketch",
+        "draw" => tool == "render_sketch",
+        "copy_text" => tool is "type_text" or "open_text" or "create_file" or "edit_file",
+        _ => operation == tool
+    };
     private static bool IsWorkMutation(string tool) => IsWorkInput(tool) || tool is "create_file" or "edit_file" or "open_app" or "open_text" or "focus_app" or "render_sketch" or "open_sketch";
     private static string ClipWorkText(string text, int limit)
     {

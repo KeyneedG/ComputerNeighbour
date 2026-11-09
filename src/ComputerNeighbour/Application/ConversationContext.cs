@@ -111,14 +111,21 @@ public static class ReplyQuality
     internal static bool ClaimsComputerAction(string answer)
     {
         const string firstPerson = @"\bI(?:['’]ll| will|['’]m(?: going to)?| am(?: going to)?)\s+(?:(?:now|just|currently|go ahead and|start)\s+)*";
-        const string computerTarget = @"(?:file|folder|document|app(?:lication)?|window|browser|tab|notepad|paint|calculator|canvas|screen|desktop|cursor|clipboard)";
+        const string completed = @"\bI(?:['’]ve| have)?\s+(?:(?:just|already|successfully)\s+)*";
+        const string computerTarget = @"(?:draft (?:file|document)|file|folder|document|app(?:lication)?|window|browser|tab|notepad|paint|calculator|canvas|screen|desktop|cursor|clipboard)";
         const string appTarget = @"\s+(?:up\s+)?(?:(?:the|your|a|an|new)\s+)*(?:" + computerTarget + @"|(?-i:[A-Z][\p{L}\p{N}.-]+))\b";
         const RegexOptions ignoreCase = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
         return Regex.IsMatch(answer, firstPerson +
             @"(?:(?:open(?:ing)?|launch(?:ing)?|switch(?:ing)? to)" + appTarget +
             @"|(?:sav(?:e|ing)|writ(?:e|ing)|typ(?:e|ing)|edit(?:ing)?|creat(?:e|ing)|draw(?:ing)?|sketch(?:ing)?|click(?:ing)?|mov(?:e|ing)|press(?:ing)?)\b[^.!?\r\n]{0,100}\b" + computerTarget + @"\b)",
             ignoreCase) ||
+            Regex.IsMatch(answer, firstPerson + @"(?:(?:ask(?:ing)?|chat(?:ting)?|talk(?:ing)?|convers(?:e|ing))\s+(?:(?:with|to)\s+)?(?:Google\s+AI|Gemini)\b|(?:(?:begin|resume|continue)\s+)?(?:a|the|my)\s+(?:Google\s+AI|Gemini)\s+conversation\b)|" +
+                completed + @"(?:asked|chatted|talked|conversed)\s+(?:(?:with|to)\s+)?(?:Google\s+AI|Gemini)\b", ignoreCase) ||
             Regex.IsMatch(answer, firstPerson + @"(?:open(?:ing)?\s+(?:x(?:\.com)?|twitter)\b|(?:post(?:ing)?|publish(?:ing)?|submit(?:ting)?)\s+(?:it|that|(?:the|my|your|a) (?:post|note|draft))\b)", ignoreCase) ||
+            Regex.IsMatch(answer, completed + @"(?:(?:posted|published|submitted)\s+(?:it|that|(?:the|my|your|a) (?:post|note|draft|excerpt|story))\b|(?:posted|published|submitted|sent|shared)\b[^.!?\r\n]{0,100}\b(?:on|to)\s+(?:https?://)?(?:www\.)?(?:x(?:\.com)?|twitter)\b)", ignoreCase) ||
+            Regex.IsMatch(answer, completed + @"(?:opened\s+(?:the|my|your|a)\s+draft\b|(?:clicked|pressed)\s+(?:the\s+)?[""“”']?(?:publish|post)(?:\s+button)?\b)", ignoreCase) ||
+            Regex.IsMatch(answer, @"(?:^|[.!?]\s+)(?:posting|publishing|sending|sharing)\b[^.!?\r\n]{0,100}\b(?:on|to|via)\s+[`""']?(?:https?://)?[a-z0-9.-]+\.[a-z]{2,}\b|(?:^|[.!?]\s+|\bя\s+)нажал[а]?\s+(?:на\s+)?[""«»]?(?:опубликовать|запостить)\b", ignoreCase) ||
+            Regex.IsMatch(answer, @"\b(?:the post|the note|it)\s+(?:is live|was posted|has been posted)\s+on\s+(?:x(?:\.com)?|twitter)\b|\bя\s+(?:(?:уже|только что)\s+)?(?:запостил[а]?|опубликовал[а]?)\b", ignoreCase) ||
             Regex.IsMatch(answer, firstPerson + @"renam(?:e|ing)\b|\bI(?:['’]ve| have)?\s+(?:just |already )?renamed\b|" +
                 @"\bI can rename (?:them|it|(?:the|my) (?:entries|files|documents))\b", ignoreCase) ||
             Regex.IsMatch(answer, @"\bI(?:['’]ve| have)?\s+(?:(?:just|already|successfully)\s+)*(?:opened|launched|switched to)" + appTarget, ignoreCase) ||

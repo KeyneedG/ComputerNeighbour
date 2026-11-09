@@ -9,7 +9,12 @@ public sealed class BrowserOptions
     public List<string> AllowedProcesses { get; set; } = ["chrome", "msedge", "firefox", "brave", "opera", "vivaldi"];
 }
 
-public sealed record BrowserPage(string Browser, string Title, string? Url, string Text, bool Truncated,string ReadMethod="accessibility");
+public sealed record BrowserPage(string Browser, string Title, string? Url, string Text, bool Truncated,string ReadMethod="accessibility")
+{
+    internal IReadOnlyList<BrowserControl> Controls { get; init; } = [];
+}
+
+internal sealed record BrowserControl(string Name, int X, int Y, bool Editable, bool Focused, string? Value = null, bool IsLink = false);
 
 public static class BrowserAddress
 {
