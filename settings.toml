@@ -1,0 +1,143 @@
+name = "Амадея"
+
+[cycle]
+idle_seconds = 120
+speech_cooldown_seconds = 360
+sleep_at = 0.82
+wake_at = 0.23
+awake_hours = 16.0
+sleep_hours = 8.0
+
+[signals.user]
+contact = 1.0
+
+[signals.study]
+novelty = 0.7
+reward = 0.3
+
+[signals.tool_error]
+strain = 0.2
+
+[physiology.dopamine]
+baseline = 0.45
+half_life_minutes = 45
+novelty = 0.11
+reward = 0.12
+
+[physiology.serotonin]
+baseline = 0.55
+half_life_minutes = 90
+reward = 0.09
+strain = -0.06
+
+[physiology.cortisol]
+baseline = 0.22
+half_life_minutes = 30
+strain = 0.14
+rest = -0.09
+
+[physiology.oxytocin]
+baseline = 0.30
+half_life_minutes = 70
+contact = 0.08
+affiliation = 0.10
+
+[physiology.melatonin]
+baseline = 0.2
+half_life_minutes = 40
+circadian = 0.48
+
+[mood.valence]
+bias = 0.333333
+serotonin = 0.333333
+dopamine = 0.333333
+cortisol = -0.333333
+
+[mood.arousal]
+bias = 0.333333
+cortisol = 0.333333
+dopamine = 0.333333
+melatonin = -0.333333
+
+[mood.affiliation]
+oxytocin = 1.0
+
+[brain]
+repo = "Jitheswar/Qwen3.5-4B-Amadeus"
+revision = "08856cd2f7cef9e1ece851e6eacc12d304ab8ca1"
+device = "cuda"
+quantize = true
+fast_kernels = true
+context_tokens = 5120
+response_tokens = 760
+temperature = 0.65
+
+[memory]
+consolidate_after = 10
+recent_chars = 4200
+summary_chars = 1400
+recall_items = 4
+
+[study]
+languages = ["ru", "en"]
+interval_seconds = 900
+article_chars = 8500
+teacher_tokens = 550
+timeout_seconds = 20
+[[study.teachers]]
+name = "Google Gemini"
+kind = "browser"
+url = "https://gemini.google.com/app"
+# [[study.teachers]]
+# name = "Научный наставник"
+# url = "https://provider.example/v1/chat/completions"
+# model = "model-id"
+# api_key_env = "AMADEA_TEACHER_KEY"
+
+[lora]
+enabled = true
+min_new = 24
+replay = 16
+validation = 12
+epochs = 1
+max_tokens = 384
+rank = 8
+learning_rate = 0.00008
+max_regression = 0.05
+vision_tokens = 1400
+
+[browser]
+enabled = true
+width = 800
+height = 600
+headless = false
+max_steps = 24
+max_seconds = 900
+settle_seconds = 1.0
+question_chars = 700
+answer_chars = 6000
+history_steps = 6
+
+[browser_training]
+seed = 14967
+layouts = 12
+held_out_layouts = 4
+epochs = 2
+learning_rate = 0.0001
+max_regression = 0.02
+
+[desktop]
+enabled = true
+max_side = 1152
+switch_seconds = 4
+approval_seconds = 120
+
+[voice]
+enabled = true
+repo = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+revision = "0c0e3051f131929182e2c023b9537f8b1c68adfe"
+speaker = "Ono_Anna"
+language = "Auto"
+device = "cpu"
+threads = 6
+max_chars = 400
