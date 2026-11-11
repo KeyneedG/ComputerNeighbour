@@ -73,6 +73,14 @@ public static class ReplyQuality
         return recentReplies.Any(previous=>Normalize(previous)==normalized||IsRepeated(previous,reply));
     }
 
+    internal static bool MakesPersonalCommitment(string text) => Regex.IsMatch(text,
+        @"\bI(?:['’]ll| will|['’]m going to| am going to| plan to| intend to|['’]ve decided to| have decided to)\s+\p{L}",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    internal static bool ClaimsPersonalRecollection(string text) => Regex.IsMatch(text,
+        @"\bI\s+(?:(?:also|specifically|clearly)\s+)?(?:noticed|remember|saw|heard|picked up on)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     public static bool IsNameQuestion(string text)=>Regex.IsMatch(text,@"\bwhat(?:'s| is) my (?:preferred )?name\b|\bwhat (?:did I ask you to call me|I asked you to call me)\b|\bremind me (?:what|how) I asked you to call me\b|как\s+меня\s+зовут|как\s+я\s+просил\p{L}*.*называть",RegexOptions.IgnoreCase);
     public static bool IsNameAnswer(string answer,string name)
     {

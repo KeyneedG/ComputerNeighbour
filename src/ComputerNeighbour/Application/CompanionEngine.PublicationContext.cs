@@ -15,13 +15,27 @@ public sealed partial class CompanionEngine
 
     private static readonly Regex PublicationSiteToken = new(@"(?<![\p{L}\p{N}._@:/-])(?<site>" + SiteName + @")(?=$|[\s,?!;.)\]])", WorkWords);
 
+    private string RecentConversationForReview(IEnumerable<MemoryEntry> history) => string.Join('\n', history
+        .Where(entry => entry.Role is "user" or "assistant").TakeLast(6)
+        .Select(entry => $"{(entry.Role == "assistant" ? "assistant" : IsMainSpeaker(entry.SpeakerId) ? "owner" : "other speaker")}: {ClipWorkText(entry.Text, 350)}"));
+
+    private async Task<bool> HasPublicationTopicAsync(string input, string conversation, CancellationToken ct)
+    {
+        if (model is not IReplyTaskModel) return true;
+        // Only the conversation supplies context here. An older task or saved destination could bias the check.
+        var topic = await ReadReplyTaskAsync(input, "", [], ct, topicConversation: conversation);
+        return topic is { Action: "owner_task", Route: "publication" } &&
+            TurnPlanner.ContainsEvidence(OwnerActionText(input), topic.Evidence);
+    }
+
     private async Task<PublicationContext?> ResolvePublicationContextAsync(string input, CancellationToken ct,
-        CurrentWorkflow? contextualTask = null, MemoryEntry? contextualTurn = null, string? reviewedDraft = null, MemoryEntry? sourceTurn = null)
+        CurrentWorkflow? contextualTask = null, MemoryEntry? contextualTurn = null, string? reviewedDraft = null, MemoryEntry? sourceTurn = null,
+        bool topicConfirmed = false)
     {
         if (model is not IPublicationIntentModel interpreter) return ResolvePublicationContext(input);
         if (input.Length > 1500 || input.TrimStart().StartsWith('/')) return null;
 
-        var unquoted = WorkRequest.WithoutQuotedText(input);
+        var unquoted = OwnerActionText(input);
         var sites = PublicationSiteToken.Matches(unquoted).Select(match => BrowserAddress.Normalize(match.Groups["site"].Value))
             .OfType<string>().Select(address => new Uri(address)).DistinctBy(site => site.Host).ToArray();
         var history = sourceTurn is not null ? memory.Recent.Where(entry => entry.At < sourceTurn.At).ToArray() :
@@ -62,9 +76,7 @@ public sealed partial class CompanionEngine
             “Sure, send it” with a recorded offer → approve, none, empty site, evidence “Sure, send it”.
             “Then send what you already prepared” with a matching pending draft → retry, none, empty site, evidence “send what you already prepared”.
             """;
-        var discussion = current is null || prior is null ? "" : string.Join('\n', history
-            .Where(entry => (contextualTurn is null || entry.At <= prior.At) && entry.Role is "user" or "assistant").TakeLast(6)
-            .Select(entry => $"{(entry.Role == "assistant" ? "assistant" : IsMainSpeaker(entry.SpeakerId) ? "owner" : "other speaker")}: {ClipWorkText(entry.Text, 350)}"));
+        var discussion = RecentConversationForReview(history.Where(entry => contextualTurn is null || entry.At <= contextualTurn.At));
         var context = $"Recorded offer awaiting approval: {offer?.Request ?? "none"}\nRecorded task: {current?.Request ?? "none"}\n" +
             $"Task status: {current?.Status.ToString() ?? "none"}. {current?.Detail}\nSaved draft has author signature: {current?.SignPublication == true}\n" +
             $"Recent conversation, for reference only:\n{discussion}\n" +
@@ -86,6 +98,8 @@ public sealed partial class CompanionEngine
             var evidence = answer.GetProperty("evidence").GetString()?.Trim();
             if (action == "none" || evidence is not { Length: > 0 and <= 180 } || !TurnPlanner.ContainsEvidence(unquoted, evidence)) return null;
             if (action != "offer" && !TurnPlanner.CanGroundWork(input)) return null;
+            if (!topicConfirmed && action is ("publish" or "offer" or "approve" or "retry" or "status") &&
+                !await HasPublicationTopicAsync(input, discussion, ct)) return null;
 
             if (action == "approve" && offer is not null) return new(offer.Request, null, "", Prepared: offer);
             if ((action is "retry" or "status" || action == "approve" && current?.Pending == true) && current is not null)

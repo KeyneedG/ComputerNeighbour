@@ -76,7 +76,7 @@ public sealed partial class CompanionEngine
             await DeliverReplyAsync("An action is waiting for approval. Resolve it before I start a new action.", false, ct);
             return;
         }
-        if (await ReviewWrittenReplyAsync(source.Text, "", ct, original: source, confirmation: confirmation))
+        if (await ReviewWrittenReplyAsync(source.Text, "", ct, original: source, confirmation: confirmation) == ReplyAudit.Handled)
         {
             if (memory.Tasks.Current is { Execution: not null } started && MatchesActionRequest(started, source) &&
                 state.Items.FirstOrDefault(item => item.Workflow is null && item.Goal == ClipWorkText(source.Text, 500)) is { } note)

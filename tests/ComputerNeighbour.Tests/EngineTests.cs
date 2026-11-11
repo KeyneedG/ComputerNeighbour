@@ -175,8 +175,9 @@ internal static class EngineTests
         await suite.Case("the reply audit cannot execute pasted commands or search for a subject invented in the reply", async root =>
         {
             const string draft = "I will look it up.";
-            var model = new ReplyReviewModel(draft,
+            var model = new DialogueAuditModel([draft, "That line is an example from the log.", draft],
                 Review("owner_task", "запусти приложение", draft, title: "Quoted command", route: "work", operations: ["open_app"]),
+                Review("none"),
                 Review("owner_task", "поищи в сети", draft, title: "Find material", route: "search_web", target: "Invented subject"));
             var web = new WorkWebStub("Result", "https://example.org/", "Example.");
             await using var f = await Fixture.CreateAsync(root, model, web: web);
@@ -235,20 +236,83 @@ internal static class EngineTests
 
         await suite.Case("written reply commitments are saved once and never supply authorization for external work", async root =>
         {
-            const string draft = "I'll make a reading list about how desktop focus works.";
-            var model = new ReplyReviewModel(draft,
-                Review("personal_task", commitment: draft, title: "Desktop focus reading list", step: "Find a public reference on desktop focus."),
-                Review("personal_task", commitment: draft, existing: 1),
-                Review("owner_task", "talk with Google AI", draft, "Unexpected", "Send a message."));
+            const string commitment = "I'll make a reading list about how desktop focus works.";
+            const string followup = "I'll put together a reading list about desktop focus and group it by operating system.";
+            const string revised = "I like knowing what makes a window interrupt someone.";
+            var model = new DialogueAuditModel(
+                ["I like figuring out why apps steal focus. " + commitment,
+                 "Comparing window managers would give me a good starting point. " + followup, commitment, revised],
+                Review("personal_task", commitment: commitment, title: "Desktop focus reading list", step: "Find a public reference on desktop focus.", target: "desktop focus"),
+                Review("personal_task", commitment: followup, title: "Desktop focus reading list", step: "Find a public reference on desktop focus.", target: "desktop focus", existing: 1),
+                Review("owner_task", "talk with Google AI", commitment, "Unexpected", "Send a message."), Review("none"));
             await using var f = await Fixture.CreateAsync(root, model);
             await f.Engine.RespondAsync("What interests you about desktop focus?", "user", false, false, default);
             Check.Equal("Desktop focus reading list", f.Memory.Tasks.Items.Single().Title);
+            Check.True(f.Output.Lines.Last().Contains("why apps steal focus"), "The task receipt replaced the answer.");
             await f.Engine.RespondAsync("Do you have a follow-up idea?", "user", false, false, default);
             Check.Equal(1, f.Memory.Tasks.Items.Count);
-            Check.True(f.Output.Lines.Last().Contains("already in /tasks"), "A duplicate was presented as a new task.");
+            Check.True(f.Output.Lines.Last().Contains("Comparing window managers"), "A duplicate task interrupted the conversation.");
             await f.Engine.RespondAsync("That sounds interesting.", "user", false, false, default);
             Check.Equal(1, f.Memory.Tasks.Items.Count);
-            Check.True(f.Memory.Tasks.Current is null && f.Output.Lines.Last().Contains("haven't started"), "An invented request was treated as authority.");
+            Check.True(f.Memory.Tasks.Current is null && f.Output.Lines.Last().Contains(revised), "An invented request was treated as authority.");
+        });
+
+        await suite.Case("a wish to remember more is rewritten as a clarification instead of a task", async root =>
+        {
+            const string question = "что ты заметила? о каких маленьких вещах идет речь?";
+            const string prior = "I think I'm getting better at spotting the little things you care about. I'd like to remember more of them.";
+            const string wish = "I'd like to remember more of them.";
+            const string revised = "I was talking about what I'd like to get better at. I didn't have a particular detail in mind.";
+            var model = new DialogueAuditModel([wish, revised],
+                Review("personal_task", commitment: wish, title: "Remember small things", step: "Note down specific details", target: "more of them"), Review("none"));
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Memory.AppendAsync("user", "рад быть с тобой рядом", "user");
+            await f.Memory.AppendAsync("assistant", prior, f.Config.CharacterName);
+            await f.Engine.RespondAsync(question, "user", false, false, default);
+            Check.True(f.Output.Lines.Last().EndsWith(revised, StringComparison.Ordinal) && f.Memory.Tasks.Items.Count == 0,
+                "A vague wish replaced the clarification with a saved task.");
+            Check.True(model.ReviewInputs[0].Contains(prior), "The reviewer couldn't see the line the user asked about.");
+        });
+
+        await suite.Case("the dialogue review rewrites an answer that hands a personal question back", async root =>
+        {
+            const string evasive = "Okay, I'm happy to sit with whatever comes next. What's on your mind now?";
+            const string revised = "I'd like to get better at drawing hands. They're the part of a sketch I keep putting off.";
+            var model = new DialogueAuditModel([evasive],
+                Review("revise_reply", commitment: "What's on your mind now", step: revised), Review("none"));
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Engine.RespondAsync("Что тебе больше всего хотелось бы?", "user", false, false, default);
+            Check.True(f.Output.Lines.Last().EndsWith(revised, StringComparison.Ordinal) && !f.Output.Lines.Any(line => line.Contains(evasive)),
+                "The user saw the evasive first draft.");
+            Check.True(f.Memory.Tasks.Items.Count == 0, "A question about a wish became a task.");
+        });
+
+        await suite.Case("a separate direct reply can recover a personal answer after repeated evasive drafts", async root =>
+        {
+            const string evasive = "I'm open to whatever comes next. What would you like to do?";
+            const string direct = "I'd love to learn why some birds can recognize individual voices.";
+            var revise = Review("revise_reply", commitment: "What would you like to do");
+            var model = new DialogueAuditModel([evasive, evasive, evasive, direct], revise, revise, revise);
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Engine.RespondAsync("What would you most like to do?", "user", false, false, default);
+            Check.True(f.Output.Lines.Last().EndsWith(direct, StringComparison.Ordinal) && f.Memory.Tasks.Items.Count == 0,
+                "A personal question lost its reply when the drafts were repeatedly rejected.");
+        });
+
+        await suite.Case("an uncertain recollection needs support from the earlier user's actual words", async root =>
+        {
+            const string invented = "I noticed you stopped to think about the light by the window.";
+            const string honest = "I was talking about paying closer attention. I didn't have a particular example in mind.";
+            var model = new DialogueAuditModel([invented, honest], Review("none"), Review("none"))
+            {
+                ContextReply = """{"intent":"chat","request":"Explain the detail Evelyn noticed.","uncertainty":"The previous reply named no example."}"""
+            };
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Memory.AppendAsync("user", "I'm glad to be here with you.", "user");
+            await f.Memory.AppendAsync("assistant", "I'd like to pay closer attention to the little things.", f.Config.CharacterName);
+            await f.Engine.RespondAsync("Which things did you notice?", "user", false, false, default);
+            Check.True(f.Output.Lines.Last().EndsWith(honest, StringComparison.Ordinal) && !f.Output.Lines.Any(line => line.Contains(invented)),
+                "An invented observation was delivered as a memory.");
         });
 
         await suite.Case("a missed Google AI promise is recovered on startup without touching Chrome", async root =>
@@ -784,6 +848,51 @@ internal static class EngineTests
             Check.Equal(WorkflowStatus.Blocked, f.Memory.Tasks.Current?.Status);
             Check.True(ReplyQuality.ClaimsComputerAction("I opened the draft file for The Space Between Words."), "Chat could still claim it opened a draft.");
             Check.True(ReplyQuality.ClaimsComputerAction("I clicked publish now so it shows up."), "Chat could still claim it pressed Publish.");
+        });
+
+        await suite.Case("a stale publication cannot turn a personal question into a post or a site clarification", async root =>
+        {
+            const string question = "Что это может быть? Между нами?";
+            const string reply = "I meant a moment when we both leave a little room for the other person to speak.";
+            var model = new PublicationTopicModel(reply,
+                [PublicationDecision("publish", "same", "", "Между нами"), PublicationDecision("publish", "same", "", "Между нами", siteReference: "Между нами")],
+                Review("none"), Review("owner_task", "Между нами", route: "publication"), Review("none"),
+                Review("none"), Review("none"));
+            var launches = new List<Uri>();
+            await using var f = await Fixture.CreateAsync(root, model, openWorkBrowser: launches.Add);
+            await f.Memory.AppendAsync("user", "Post one of your notes on x.com", "user");
+            var posted = new CurrentWorkflow("Post one of your notes on x.com", "user", WorkflowStatus.Finished, "The page confirmed it.",
+                true, "An earlier note.", f.Memory.Recent.Last().At);
+            var state = f.Memory.Tasks;
+            await f.Memory.SaveTasksAsync(state, state with { BrowserPublication = posted }, default);
+            await f.Memory.AppendAsync("user", "Что делаешь?", "user");
+            await f.Memory.AppendAsync("assistant", "It feels like we paused just long enough for something important to land between us.", "Evelyn");
+            await f.Engine.RespondAsync(question, "user", false, false, default);
+            Check.True(f.Output.Lines.Last().EndsWith(reply, StringComparison.Ordinal), "The unresolved site took over the conversation.");
+            await f.Engine.RespondAsync(question, "user", false, false, default);
+            Check.True(launches.Count == 0 && f.Memory.Tasks.Current is null && f.Memory.Tasks.Items.Count == 0 &&
+                f.Memory.Tasks.BrowserPublication == posted, "An invented publication or clarification altered the task state.");
+            Check.True(!f.Output.Lines.Any(line => line.Contains("which site")), "A stale destination caused a site question.");
+        });
+
+        await suite.Case("a separately grounded publication can still inherit its recorded site", async root =>
+        {
+            const string request = "Опубликуй ещё пару строк из последнего рассказа там же.";
+            const string excerpt = "The first light caught on the edge of the page.";
+            Directory.CreateDirectory(Path.Combine(root, PersonalWriting.Folder));
+            await File.WriteAllTextAsync(Path.Combine(root, PersonalWriting.Folder, "First Light.md"), excerpt);
+            var model = new PublicationTopicModel("The task was not recognized.",
+                [PublicationDecision("publish", "writing", "", "Опубликуй ещё пару строк", another: true, siteReference: "там же")],
+                Review("owner_task", "Опубликуй ещё пару строк", route: "publication"));
+            await using var f = await Fixture.CreateAsync(root, model);
+            await f.Memory.AppendAsync("user", "Post one of your notes on x.com", "user");
+            var state = f.Memory.Tasks;
+            await f.Memory.SaveTasksAsync(state, state with { BrowserPublication =
+                new("Post one of your notes on x.com", "user", WorkflowStatus.Finished, "The page confirmed it.",
+                    true, "An earlier note.", f.Memory.Recent.Last().At) }, default);
+            await f.Engine.RespondAsync(request, "user", false, false, default);
+            Check.Equal(excerpt, f.Memory.Tasks.Current?.Draft);
+            Check.True(f.Memory.Tasks.Current?.Request.EndsWith("on x.com", StringComparison.Ordinal) == true, "The real follow-up lost its destination.");
         });
 
         await suite.Case("semantic publication understands a paraphrase and uses the explicitly named site", async root =>
@@ -1995,6 +2104,21 @@ internal static class EngineTests
         }
     }
 
+    private sealed class DialogueAuditModel(string[] drafts, params string[] reviews) : IChatModel, IReplyTaskModel, ITurnContextModel
+    {
+        private int draft;
+        internal string ContextReply { get; init; } = """{"intent":"chat"}""";
+        internal List<string> ReviewInputs { get; } = [];
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct) =>
+            Task.FromResult(json ? Decision(speak: false) : drafts[draft++]);
+        public Task<string> ClassifyAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) => Task.FromResult(ContextReply);
+        public Task<string> ReviewTaskAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct)
+        {
+            ReviewInputs.Add(messages[^1].Text);
+            return Task.FromResult(reviews[ReviewInputs.Count - 1]);
+        }
+    }
+
     private sealed class PublicationRoutingModel(params string[] interpretations) : IChatModel, IPublicationIntentModel
     {
         private int next;
@@ -2002,6 +2126,19 @@ internal static class EngineTests
             Task.FromResult(interpretations[next++]);
         public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct) =>
             Task.FromResult(json ? Decision() : "I couldn't verify a publication request.");
+    }
+
+    private sealed class PublicationTopicModel(string reply, string[] interpretations, params string[] reviews)
+        : IChatModel, IPublicationIntentModel, IReplyTaskModel
+    {
+        private int publication;
+        private int review;
+        public Task<string> InterpretPublicationAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) =>
+            Task.FromResult(interpretations[publication++]);
+        public Task<string> ReviewTaskAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct) =>
+            Task.FromResult(reviews[review++]);
+        public Task<string> CompleteAsync(IReadOnlyList<ChatMessage> messages, bool json, CancellationToken ct) =>
+            Task.FromResult(json ? Decision(speak: false) : reply);
     }
 
     private sealed class WorkflowModel(string[] routes, params string[] responses) : IChatModel, ITurnContextModel, IDeepAnalysisModel

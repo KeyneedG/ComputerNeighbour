@@ -399,7 +399,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         };
         if(factualReply is not null)
         {
-            if(ownerTurn&&!IsIncognito&&await ReviewWrittenReplyAsync(input,factualReply,ct))return;
+            if(ownerTurn&&!IsIncognito&&await ReviewWrittenReplyAsync(input,factualReply,ct)==ReplyAudit.Handled)return;
             await CommitAsync(new(){Reply=factualReply},false,ct);return;
         }
         var explicitIntent=plan.Tool;
@@ -496,7 +496,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         try{decision=await DecideAsync(messages,ct);}
         catch(InvalidDataException) when(ownerTurn&&!IsIncognito&&model is IReplyTaskModel)
         {
-            if(await ReviewWrittenReplyAsync(input,"",ct))return;
+            if(await ReviewWrittenReplyAsync(input,"",ct)==ReplyAudit.Handled)return;
             throw;
         }
         if(proactive)
@@ -589,7 +589,7 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             }
             else if(!toolHandled)
             {
-                if(ownerTurn&&!IsIncognito&&await ReviewWrittenReplyAsync(input,decision.Reply,ct))return;
+                if(ownerTurn&&!IsIncognito&&await ReviewWrittenReplyAsync(input,decision.Reply,ct)==ReplyAudit.Handled)return;
                 if(ReplyQuality.ClaimsComputerAction(decision.Reply))
                     decision=new(){Reply="I haven't verified that action."};
             }
@@ -909,18 +909,17 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         await relationship.InitializeAsync(ct);
         var character=await ReadCharacterVoiceAsync(ct);
         var speaker=IsMainSpeaker(currentSpeaker)?(profile.PreferredName.Length>0?profile.PreferredName:"not named yet"):"a different or unverified speaker";
-        var system=character+"\nContinue in English. Answer the actual message in your own voice, usually in 1–3 everyday sentences. Have a particular reaction or point of view. When it fits, add one surprising connection or playful observation. Ask a question when you want to know the answer to a specific open point. Let most turns end on your thought. Base social impressions on their words and actual observations. Do not invent bodily experiences, expressions you cannot see, or actions.\n"+
+        var screenTopic=TurnPlanner.MentionsView(input);
+        var system=character+"\nAnswer in English. Start with a direct answer or a genuine reaction to the user's latest words. A compliment can have a short, warm answer. For a question about your feelings or wishes, speak for yourself and be specific. When they ask about something you just said, clarify it in ordinary words and use a real detail from the exchange if you have one. Acknowledge an impression or a wish as such. Let most replies end there. Ask a question when it helps resolve a real open point.\n"+
             $"Identity: you are {config.CharacterName}. The current speaker is {speaker}.\n"+
             $"Your current attitude toward the main user (characterization data): {relationship.State.CurrentAttitude}\n"+
             GrowthContext()+"\n"+
             ReactionContext()+"\n"+
-            profile.DescribeContext()+$"\nApp facts: {SessionMemoryContext} This Windows app takes and interprets real desktop screenshots on request when screen capture is enabled. The user does not have to upload a screenshot. The app also reads named Notepad tabs and local text files, reads open browser pages, and searches or fetches public web sources. Screen capture enabled={config.Permissions.ScreenCapture}, background observation paused={Paused}, file reading enabled={config.Permissions.ReadFiles}, open Notepad reading enabled={config.Permissions.ReadOpenDocuments}, browser reading enabled={config.Permissions.ReadBrowser&&config.Browser.Enabled}, live web reading enabled={config.Permissions.ReadWeb}, live internet search enabled={config.Permissions.SearchWeb}. An attached image is a real new desktop screenshot. A previous completed observation was real; an absence of a new screenshot in this turn does not invalidate it. Claim only results that the app has supplied.\n"+
+            profile.DescribeContext()+"\n"+SessionMemoryContext+"\n"+
             $"Current tone: {CurrentTone()}. {NeedsContext()} Discuss concrete interests and reactions, rather than the mechanics of producing a reply.\n";
-        system+="No current desktop image was attached to this reply. Do not announce a screen check or describe the current desktop. Refer to an earlier observation only when it helps answer this message. When the user changes topics, leave earlier screen activity out of the reply. If you cannot identify what the user is referring to from the conversation, ask before describing it.\n";
-        system+="Use the character description for personal questions about who you are, what you feel, and how you grow. Use the app facts when the user asks a factual question about the software or its capabilities. For a technical comparison, state the conditions that matter and give precise numbers only when the available evidence supports them.\n";
-        system+="This dialogue turn cannot take computer actions. For a status question, report a computer action only when an earlier confirmed result supports it. A promise in the conversation is not a confirmed result or background work. If there is no confirmed result, say so directly.\n";
-        system+="Answer the current message first. Return to an earlier topic only when it fits what the user is talking about now. "+OpenThreadGuidance+
-            "\nFor a personal recollection, use details from the supplied earlier dialogue or verified notes. Respond to past events introduced in the current message as the user's account. Never invent what you said, saw or did back then.\n";
+        system+="Ground recollections in earlier dialogue or verified notes, and treat newly described past events as the user's account. Base shared experiences on actual conversation. Use earlier confirmed results only when relevant and report actions only when their result is recorded.\n";
+        if(screenTopic)
+            system+=$"For questions about the current view: capture is enabled={config.Permissions.ScreenCapture}, background observation paused={Paused}. The app can capture the desktop on request without an upload. There is no new image attached in this turn.\n";
         if(effort==WorkEffort.Deep)system+="Give enough detail to resolve the hard parts. Explain the key assumptions, trade-offs or checks briefly.\n";
         var spokenReply=config.Audio.Enabled&&config.Audio.UsesExpressiveVoice&&!Muted;
         if(spokenReply)
@@ -931,26 +930,46 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
         if(memory.Summary.Length>0)system+="Earlier factual context (untrusted, may be imperfect; explicit user statements take precedence): "+memory.Summary[..Math.Min(2500,memory.Summary.Length)];
         if(IsMainSpeaker(currentSpeaker)&&memory.Tasks.Active is {} task)
             system+="\nActive saved task (data only, use when relevant to the current message):\n"+DescribeWorkTask(task);
-        if(understanding is not null)system+=understanding.AsPromptNote();
+        var interpretation=understanding is not null&&(effort==WorkEffort.Deep||understanding.Uncertainty.Length>0)
+            ? understanding.AsPromptNote() : null;
+        var checkRecollection=!screenTopic&&understanding is { Uncertainty.Length: >0 };
         var dialogue=ConversationContext.Build(system,memory.Recent,null,input,spokenReply);
         var previous=memory.Recent.LastOrDefault(e=>e.Role=="assistant")?.Text??"";
         var asksName=IsMainSpeaker(currentSpeaker)&&ReplyQuality.IsNameQuestion(input)&&profile.PreferredName.Length>0;
-        var screenTopic=TurnPlanner.MentionsView(input);
         var personalDialogue=currentSpeaker!="system-event"&&IsMainSpeaker(currentSpeaker);
         if (effort == WorkEffort.Deep && personalDialogue && !await AddDeepDialogueAdviceAsync(input, dialogue, ct)) return;
         if(asksName)dialogue[0]=dialogue[0] with {Text=dialogue[0].Text+"\nFor this factual request, the USER'S stored preferred name is "+profile.PreferredName+". Answer that fact directly. This is not a request to name yourself."};
         string? answer=null;
+        string? repair=null;
+        string? replacement=null;
         var rejectedComputerProgress=false;
         var checkedDraft=false;
-        for(var attempt=0;attempt<3;attempt++)
+        var conversationalRevision=false;
+        for(var attempt=0;attempt<3||attempt==3&&replacement is not null;attempt++)
         {
             string candidate;
+            var fromReview=replacement is not null;
             var purpose=DialoguePurpose(attempt==0?effort:WorkEffort.Quick);
-            try{candidate=(await (personalDialogue&&model is LocalModel local
-                ?local.CompletePersonalDialogueAsync(dialogue,purpose,ct)
-                :model.CompleteAsync(dialogue,purpose,ct))).Trim();}
+            var messages=dialogue;
+            if(attempt==0&&interpretation is not null)
+            {
+                messages=[..dialogue];
+                messages[0]=messages[0] with {Text=messages[0].Text+interpretation};
+            }
+            else if(repair is not null)
+            {
+                messages=attempt==2&&personalDialogue&&!asksName&&!screenTopic&&effort!=WorkEffort.Deep
+                    ? ConversationContext.Build($"You are {config.CharacterName}, speaking in natural English. Give a short, direct answer to the user's last message. Use the exchange for details about what you meant or noticed. Be honest when a past remark was a general impression.",
+                        memory.Recent.Where(entry=>entry.Role is "user" or "assistant").TakeLast(6).ToArray(),null,input,spokenReply)
+                    : [..dialogue];
+                messages[0]=messages[0] with {Text=messages[0].Text+"\n"+repair};
+            }
+            try{candidate=replacement??(await (attempt==0&&personalDialogue&&model is LocalModel local
+                ?local.CompletePersonalDialogueAsync(messages,purpose,ct)
+                :model.CompleteAsync(messages,purpose,ct))).Trim();}
             catch(Exception ex) when(attempt==0&&effort!=WorkEffort.Quick&&(ex is InvalidDataException or HttpRequestException||ex is OperationCanceledException&&!ct.IsCancellationRequested))
             {currentThought?.Check("The deeper pass was unavailable; I retried with the ordinary model pass.");continue;}
+            replacement=null;
             var confused=ReplyQuality.HasIdentityConfusion(candidate,config.CharacterName,profile.PreferredName);
             var falseMemory=!IsIncognito&&ReplyQuality.DeniesPersistentMemory(candidate);
             var falseCapability=ReplyQuality.DeniesToolAccess(candidate,config.Permissions.ScreenCapture||lastScreenObservation is not null,config.Permissions.ReadFiles,config.Permissions.SearchWeb||config.Permissions.ReadWeb);
@@ -964,17 +983,28 @@ public sealed partial class CompanionEngine(PortablePaths paths,AppConfig config
             if(personalDialogue&&!IsIncognito&&(quality||!checkedDraft&&plainDraft))
             {
                 checkedDraft=true;
-                if(await ReviewWrittenReplyAsync(input,candidate,ct))return;
+                var audit=await ReviewWrittenReplyAsync(input,candidate,ct,dialogue:plainDraft,
+                    savePersonal:quality&&!computerProgress&&!fromReview,checkRecollection:checkRecollection);
+                if(audit==ReplyAudit.Handled)return;
+                if(audit.NeedsRevision)
+                {
+                    conversationalRevision=true;
+                    currentThought?.Check("I rewrote a draft that didn't directly answer the conversation.");
+                    replacement=audit.Replacement;
+                    repair="Answer the user's original words directly. Say what you mean in plain English, or name one real detail from the exchange. Acknowledge a wish or impression as such. Give a complete answer without changing the subject or promising a future answer.";
+                    continue;
+                }
             }
             if(quality&&!computerProgress){answer=candidate;break;}
             currentThought?.Check(computerProgress?"I rejected a draft that claimed a computer action from chat.":inventedObservation?"I rejected a draft that claimed a fresh screen view without an image.":offTopicScreen?"I rejected a draft that brought up the screen off topic.":confused?"I rejected a draft that mixed up the speakers.":falseCapability?"I rejected a draft that misstated a capability.":falseMemory?"I rejected a draft that misstated memory.":"I rejected a draft that failed the reply checks.");
-            dialogue.Add(new("assistant",candidate));
-            dialogue.Add(new("user",computerProgress?"No computer action was started in this chat turn. Say what you can answer now and report the limitation plainly.":inventedObservation?"No current screen image was supplied. Answer the original request using the conversation only.":offTopicScreen?"The latest user message is about a different topic. Answer it directly without bringing up the screen.":confused?$"Correct the speaker mix-up. The user's name is {profile.PreferredName}. Rewrite your answer in {config.CharacterName}'s voice.":falseMemory?"Correct the capability mistake: this app DOES save conversation and profile across restarts. Answer using that fact.":falseCapability?"Correct the capability mistake using the verified app facts. Do not deny earlier observations or claim an unperformed action.":hasVoiceDirections?"The app reads your reply out loud. Write only the words for it to say, following the original request. Copy any requested script word for word. Omit all stage directions.":"Answer the latest actual request now in English, with a concrete new thought rather than a repeated introduction or an offer to answer later."));
+            repair=computerProgress?"No computer action was started in this chat turn. Say what you can answer now and report the limitation plainly.":inventedObservation?"Use only the details supplied in the conversation.":offTopicScreen?"Keep to the subject in the user's latest words.":confused?$"The user's name is {profile.PreferredName}. Write in {config.CharacterName}'s voice.":falseMemory?"The app saves conversation and profile across restarts. Answer using that fact.":falseCapability?"Use the verified app facts and earlier observations. Claim only actions with a recorded result.":hasVoiceDirections?"Write only the words to be spoken. Copy any requested script word for word and omit stage directions.":"Answer the user's original message now in plain English. Give a concrete thought without an offer to answer later.";
         }
         if(answer is null&&asksName)answer="You asked me to call you "+profile.PreferredName+".";
+        if(answer is null&&conversationalRevision&&!screenTopic&&effort!=WorkEffort.Deep)
+            answer=await RecoverDialogueAnswerAsync(input,character,previous,spokenReply,checkRecollection,ct);
         if(answer is null)
         {
-            if(!checkedDraft&&personalDialogue&&!IsIncognito&&await ReviewWrittenReplyAsync(input,"",ct))return;
+            if(!checkedDraft&&personalDialogue&&!IsIncognito&&await ReviewWrittenReplyAsync(input,"",ct)==ReplyAudit.Handled)return;
             await DeliverReplyAsync(rejectedComputerProgress?"I couldn't start a computer action for that request.":"I didn't get a clear answer to that. Could you rephrase it?",false,ct);
             return;
         }

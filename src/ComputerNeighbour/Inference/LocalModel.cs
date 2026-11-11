@@ -42,7 +42,7 @@ public sealed class LocalModel(PortablePaths paths, ModelOptions options, Cancel
 {
     private static readonly JsonElement ReplyTaskSchema = JsonSerializer.Deserialize<JsonElement>("""
         {"type":"object","additionalProperties":false,"required":["action","evidence","previousEvidence","commitment","title","nextStep","existing","route","target","operations","defer"],"properties":{
-          "action":{"type":"string","enum":["none","google_ai","owner_task","personal_task","unverified","repeat_task"]},
+          "action":{"type":"string","enum":["none","google_ai","owner_task","personal_task","unverified","repeat_task","revise_reply"]},
           "evidence":{"type":"string","maxLength":300},"commitment":{"type":"string","maxLength":300},
           "previousEvidence":{"type":"string","maxLength":300},
           "title":{"type":"string","maxLength":100},"nextStep":{"type":"string","maxLength":300},
